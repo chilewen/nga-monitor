@@ -1,55 +1,38 @@
-name: NGA User Monitor
+name: NGA-Hupu-Monitor
 
+# 触发条件：
+# 1. 定时运行 (这里设置为每 10 分钟运行一次，你可以修改 cron 表达式)
+# 2. 允许手动点击按钮运行 (workflow_dispatch)
 on:
   schedule:
-    # 每 15 分钟运行一次 (UTC 时间，请注意时差，这里写的是每15分)
-    - cron: '*/15 * * * *'
-  workflow_dispatch: # 允许手动点击运行测试
+    - cron: '*/10 * * * *' 
+  workflow_dispatch:
 
 jobs:
-  check-post:
+  run-monitor:
     runs-on: ubuntu-latest
+    
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+      # 1. 下载代码
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
+      # 2. 设置 Python 环境
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
+      # 3. 安装依赖库
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install requests
 
+      # 4. 运行监控脚本
+      # 【关键步骤】在这里将 GitHub Secrets 映射为环境变量
       - name: Run Monitor Script
         run: python monitor.py
-
-      # 关键步骤：保存 last_post_id.txt 到 GitHub Cache 或 Artifact
-      # 因为 GitHub Actions 每次运行都是全新的环境，必须持久化存储上次的 TID
-      - name: Save Last TID
-        uses: actions/cache/save@v3
-        with:
-          path: last_post_id.txt
-          key: nga-last-tid-${{ github.run_id }}
-          restore-keys: |
-            nga-last-tid-
-      
-      # 实际上上面的 cache/save 比较复杂，更简单的做法是利用 GitHub Secrets 存储状态
-      # 但为了简化，我们可以用一个 Trick：利用 GitHub Issues 或 简单的文件提交来记录
-      # 【修正方案】：最简单的方法是让脚本把新状态 commit 回仓库，或者使用 GitHub Environment Variables
-      # 下面采用 "Commit back to repo" 的方式记录状态 (最稳妥)
-      
-      - name: Commit and push if changed
-        run: |
-          git config --local user.email "chilewen@126.com"
-          git config --local user.name "wenzl"
-          git add last_post_id.txt
-          git diff --quiet && git diff --staged --quiet || git commit -m "Update last post ID"
-          git push
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          env:
-          # 【关键】必须在这里显式地将 Secrets 映射为环境变量
           BARK_KEY: ${{ secrets.BARK_KEY }}
           NGA_COOKIE: ${{ secrets.NGA_COOKIE }}
