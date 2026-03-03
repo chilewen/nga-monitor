@@ -4,7 +4,8 @@ import os
 import time
 
 # ================= 配置区域 =================
-BARK_KEY = "https://api.day.app/H4TvmYKzupRxHAgrpTD65N" 
+# BARK_KEY 现在从 GitHub Secrets 中读取，不再硬编码
+# 请确保在 GitHub Settings -> Secrets 中设置了 BARK_KEY 和 NGA_COOKIE
 
 # --- NGA 配置 ---
 NGA_ENABLE = True
@@ -20,8 +21,21 @@ HUPU_RECORD_FILE = "hupu_last_record.txt"
 HUPU_MAX_PAGES = 5
 # =======================================================
 
+def get_bark_key():
+    key = os.getenv("BARK_KEY")
+    if not key:
+        print("[错误] 未找到 BARK_KEY 环境变量！请在 GitHub Secrets 中设置 BARK_KEY。")
+        return None
+    # 自动去除首尾空格，防止复制时带入了多余字符
+    return key.strip()
+
 def send_bark_notification(title, content, jump_url, group_name):
-    url = f"{BARK_KEY}/{title}"
+    bark_key = get_bark_key()
+    if not bark_key:
+        print(f"[Push 跳过] 因缺少 BARK_KEY，无法推送: {title}")
+        return
+
+    url = f"{bark_key}/{title}"
     params = {
         "body": content,
         "url": jump_url,
@@ -31,18 +45,21 @@ def send_bark_notification(title, content, jump_url, group_name):
     }
     try:
         resp = requests.get(url, params=params, timeout=5)
-        print(f"[Push] {title}: {resp.text}")
+        # Bark 成功通常返回 {"code":200, ...}
+        if resp.status_code == 200:
+            print(f"[Push 成功] {title}")
+        else:
+            print(f"[Push 失败] 状态码: {resp.status_code}, 内容: {resp.text}")
     except Exception as e:
-        print(f"[Push Error] {e}")
+        print(f"[Push 错误] {e}")
 
 def check_nga():
     if not NGA_ENABLE:
         return
     
-    print("--- 开始检查 NGA (带 Cookie 模式) ---")
+    print("--- 开始检查 NGA ---")
     url = NGA_URL_TEMPLATE.format(NGA_UID)
     
-    # 获取 Cookie
     nga_cookie = os.getenv("NGA_COOKIE")
     
     headers = {
@@ -52,39 +69,31 @@ def check_nga():
         "Referer": "https://bbs.nga.cn/",
     }
     
-    # 如果有 Cookie，加入 Header
     if nga_cookie:
         headers["Cookie"] = nga_cookie
-        print("NGA: 已加载 Cookie，尝试以登录状态访问...")
+        print("NGA: 已加载 Cookie")
     else:
-        print("NGA: 警告！未检测到 NGA_COOKIE 环境变量，可能无法获取数据。请检查 GitHub Secrets 设置。")
+        print("NGA: 警告！未检测到 NGA_COOKIE，可能无法获取数据。")
 
     try:
         resp = requests.get(url, headers=headers, timeout=15)
         
-        # 检测是否被重定向到登录页
-        if resp.status_code != 200 or "login" in resp.url or "登录" in resp.text:
-            print(f"NGA 请求异常：状态码 {resp.status_code} 或检测到登录页。")
-            print("原因可能是：Cookie 过期、Cookie 未正确设置、或 NGA 强制要求二次验证。")
-            # 简单调试：打印 URL 确认是否跳转
-            print(f"最终请求 URL: {resp.url}")
+        if resp.status_code != 200 or "login" in resp.url or ("登录" in resp.text and "read.php" not in resp.text):
+            print(f"NGA 请求异常：可能未登录或 Cookie 过期。状态码: {resp.status_code}")
+            print(f"当前 URL: {resp.url}")
             return
 
         content = resp.text
         
-        # 再次确认内容是否包含帖子列表（防止 Cookie 无效但没跳转）
         if "read.php?tid=" not in content:
-            print("NGA: 页面内容中未找到帖子链接，可能 Cookie 无效或无数据。")
-            # 可选：打印前 200 字排查
-            # print(content[:200])
+            print("NGA: 页面中未找到帖子链接，可能无数据或解析失败。")
             return
 
-        # --- 解析逻辑 ---
         pattern = r'<a\s+href="read\.php\?tid=(\d+)[^"]*"[^>]*>(.*?)</a>'
         matches = re.findall(pattern, content, re.DOTALL)
         
         if not matches:
-            print("NGA: 未解析到任何帖子记录。")
+            print("NGA: 未解析到任何帖子。")
             return
 
         tid = matches[0][0]
@@ -124,8 +133,6 @@ def check_nga():
             
     except Exception as e:
         print(f"NGA 错误: {e}")
-        import traceback
-        traceback.print_exc()
 
 def check_hupu():
     if not HUPU_ENABLE:
@@ -211,6 +218,19 @@ def check_hupu():
         print("虎扑: 无新回复")
 
 def main():
+    # 检查关键配置是否存在
+    if not os.getenv("BARK_KEY"):
+        print("========================================")
+        print("警告：未在 GitHub Secrets 中找到 BARK_KEY")
+        print("请在 Settings -> Secrets -> Actions 中添加 BARK_KEY")
+        print("========================================")
+    
+    if NGA_ENABLE and not os.getenv("NGA_COOKIE"):
+        print("========================================")
+        print("警告：未在 GitHub Secrets 中找到 NGA_COOKIE")
+        print("NGA 监控可能失败，请添加 NGA_COOKIE")
+        print("========================================")
+
     check_nga()
     time.sleep(3) 
     check_hupu()
