@@ -57,43 +57,87 @@ def check_nga():
     if not NGA_ENABLE:
         return
     
-    print("--- 开始检查 NGA ---")
+    print("--- 开始检查 NGA (带 Cookie 模式) ---")
     url = NGA_URL_TEMPLATE.format(NGA_UID)
     
     nga_cookie = os.getenv("NGA_COOKIE")
     
+    # 构造更真实的 Headers
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "Referer": "https://bbs.nga.cn/",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
     }
     
     if nga_cookie:
         headers["Cookie"] = nga_cookie
+        # 关键：NGA 有时需要 Referer 才能正常返回搜索页
+        headers["Referer"] = "https://bbs.nga.cn/"
         print("NGA: 已加载 Cookie")
     else:
-        print("NGA: 警告！未检测到 NGA_COOKIE，可能无法获取数据。")
+        print("NGA: 警告！未检测到 NGA_COOKIE，必定无法获取数据。")
+        return
 
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        # 创建一个 Session 来自动处理 gzip 和保持连接
+        session = requests.Session()
+        resp = session.get(url, headers=headers, timeout=15)
         
-        if resp.status_code != 200 or "login" in resp.url or ("登录" in resp.text and "read.php" not in resp.text):
-            print(f"NGA 请求异常：可能未登录或 Cookie 过期。状态码: {resp.status_code}")
-            print(f"当前 URL: {resp.url}")
-            return
-
+        # 强制解码为 utf-8，防止乱码导致匹配失败
+        resp.encoding = 'utf-8' 
         content = resp.text
         
+        # === 调试诊断区域 ===
+        debug_info = False
+        
+        # 1. 检查是否被重定向到登录页
+        if "login.php" in resp.url or "ngabbs.com/login" in resp.url:
+            print("[错误] 请求被重定向到登录页！Cookie 可能已失效。")
+            debug_info = True
+            
+        # 2. 检查页面内容是否包含典型的“未登录”或“无权限”提示
+        if "您没有权限访问" in content or "需要先登录" in content or "guest_js" not in content:
+             # guest_js 是 NGA 登录后页面通常包含的一个变量，如果没有，大概率是游客
+            print("[错误] 页面内容显示未登录或无权限。")
+            debug_info = True
+            
+        # 3. 如果没找到任何 read.php 链接，也视为异常
         if "read.php?tid=" not in content:
-            print("NGA: 页面中未找到帖子链接，可能无数据或解析失败。")
-            return
+            print("[警告] 页面中未找到任何帖子链接 (read.php?tid=)。")
+            debug_info = True
 
+        # 如果触发上述任一异常，打印部分 HTML 以便排查
+        if debug_info:
+            print("-" * 30)
+            print("【服务器返回的 HTML 片段 (前 1500 字):】")
+            # 清理一下换行符方便看
+            clean_content = content.replace('\n', '').replace('\r', '')
+            print(clean_content[:1500])
+            print("\n... (内容截断)")
+            print("-" * 30)
+            print("建议：请复制浏览器中最新的 Cookie 替换 GitHub Secret。")
+            return # 既然页面都不对，就不继续解析了
+        # === 调试诊断结束 ===
+
+        # 正常解析逻辑
         pattern = r'<a\s+href="read\.php\?tid=(\d+)[^"]*"[^>]*>(.*?)</a>'
         matches = re.findall(pattern, content, re.DOTALL)
         
         if not matches:
-            print("NGA: 未解析到任何帖子。")
+            # 如果上面没报错，但这里还是没匹配到，可能是正则太严格或页面结构变了
+            print("NGA: 正则未匹配到帖子。尝试更宽松的匹配...")
+            # 备用宽松正则
+            pattern_loose = r'read\.php\?tid=(\d+)'
+            matches_loose = re.findall(pattern_loose, content)
+            if matches_loose:
+                print(f"宽松匹配找到 TID: {matches_loose[0]}，但无法提取标题。可能是页面结构变化。")
+            else:
+                print("NGA: 确实未解析到任何帖子。")
             return
 
         tid = matches[0][0]
@@ -102,10 +146,11 @@ def check_nga():
         if len(title) > 40:
             title = title[:40] + "..."
             
+        # 提取时间逻辑 (保持不变)
         tid_pos = content.find(f'tid={tid}')
         r_time = "未知时间"
         if tid_pos != -1:
-            snippet = content[tid_pos : tid_pos + 500]
+            snippet = content[tid_pos : tid_pos + 600]
             time_match = re.search(r'(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})\s+(\d{1,2}:\d{2})', snippet)
             if time_match:
                 r_time = f"{time_match.group(1)} {time_match.group(2)}"
@@ -132,7 +177,9 @@ def check_nga():
             print("NGA: 无新动态")
             
     except Exception as e:
-        print(f"NGA 错误: {e}")
+        print(f"NGA 发生异常: {e}")
+        import traceback
+        traceback.print_exc()
 
 def check_hupu():
     if not HUPU_ENABLE:
