@@ -5,22 +5,23 @@ import re
 from datetime import datetime
 
 # ================= 配置区域 (请修改这里) =================
-# 1. 你的 Bark 链接 (去掉末尾的斜杠，例如: https://api.day.app/xxxxxxxx)
-BARK_KEY = "https://api.day.app/H4TvmYKzupRxHAgrpTD65N" 
+# 1. 你的 Bark 链接 (例如: https://api.day.app/xxxxxxxx)
+BARK_KEY = "https://api.day.app/你的KEY" 
 
-# 2. 目标 NGA 用户的 UID (在用户主页 URL 中可以看到，如 uid=123456)
+# 2. 目标 NGA 用户的 UID (你要监控的用户)
 TARGET_UID = "26529713" 
 
-# 3. 记录文件的名称 (用于在 GitHub  Actions 中保存上次检查的帖子 ID)
-RECORD_FILE = "last_post_id.txt"
+# 3. 记录文件名称
+RECORD_FILE = "last_reply_record.txt"
 # =======================================================
 
-def get_latest_post():
+def get_latest_reply():
     """
-    获取指定用户最新的帖子标题和 ID
-    注意：NGA 移动端接口经常变动，这里使用模拟移动端网页的方式
+    获取指定用户最新的回复记录
+    接口：__act=reply
     """
-    url = f"https://m.nga.cn/nuke.php?__lib=ucp&__act=topic&uid={TARGET_UID}&page=1"
+    # 注意：NGA 移动端回复列表接口
+    url = f"https://m.nga.cn/nuke.php?__lib=ucp&__act=reply&uid={TARGET_UID}&page=1"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.0",
@@ -31,38 +32,59 @@ def get_latest_post():
         response = requests.get(url, headers=headers, timeout=10)
         if response.status_code != 200:
             print(f"请求失败，状态码: {response.status_code}")
-            return None, None
+            return None, None, None
 
         content = response.text
         
-        # 正则解析：寻找帖子列表中的第一个帖子 (tid 和 标题)
-        # 注意：正则表达式需要根据 NGA 当前网页结构微调，以下为通用匹配逻辑
-        # 匹配类似 <a href="read.php?tid=xxxxx">标题</a> 的结构
-        match = re.search(r'read\.php\?tid=(\d+)".*?>(.*?)</a>', content)
+        # --- 关键解析逻辑 ---
+        # 回复列表的结构通常是：
+        # <a href="read.php?tid=XXXXX...">帖子标题</a> ... <span class="date">回复时间</span>
+        # 或者包含 blockid (pid)
         
-        if match:
-            tid = match.group(1)
-            title = match.group(2).strip()
-            # 清理标题中的 HTML 标签
+        # 策略：提取第一个回复块的 tid 和 帖子标题
+        # 匹配 read.php?tid=数字 的部分
+        tid_match = re.search(r'read\.php\?tid=(\d+)', content)
+        
+        # 匹配帖子标题 (通常在 tid 链接的文本内容里，或者附近的 > 标签内)
+        # 这种正则比较脆弱，因为移动端 HTML 结构可能微调
+        # 尝试匹配：<a ... >帖子标题</a>
+        title_match = re.search(r'read\.php\?tid=\d+[^>]*>(.*?)</a>', content)
+        
+        # 尝试匹配回复时间 (用于辅助判断，防止同贴多次回复误判，可选)
+        time_match = re.search(r'\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}', content)
+
+        if tid_match and title_match:
+            tid = tid_match.group(1)
+            title = title_match.group(1).strip()
+            # 清理标题中的 HTML
             title = re.sub(r'<[^>]+>', '', title)
-            return tid, title
+            
+            # 截取标题前20个字，防止太长
+            if len(title) > 20:
+                title = title[:20] + "..."
+                
+            reply_time = time_match.group(0) if time_match else "未知时间"
+            
+            return tid, title, reply_time
         else:
-            print("未解析到帖子，可能页面结构变更或无发帖")
-            return None, None
+            print("未解析到回复记录，可能用户无回复或页面结构变更")
+            # 打印一部分内容用于调试 (在 GitHub Logs 中查看)
+            # print(content[:500]) 
+            return None, None, None
             
     except Exception as e:
         print(f"发生错误: {e}")
-        return None, None
+        return None, None, None
 
-def send_bark_notification(title, content):
+def send_bark_notification(title, content, jump_url):
     """发送推送 Bark"""
-    # Bark 支持参数：level (紧急程度), sound (铃声), group (分组)
     url = f"{BARK_KEY}/{title}"
     params = {
         "body": content,
-        "sound": "minuet", # 铃声
-        "isArchive": "1",  # 是否归档
-        "group": "NGA监控" # 通知分组
+        "url": jump_url,      # 点击通知直接跳转到该帖子
+        "sound": "minuet", 
+        "isArchive": "1",
+        "group": "NGA回复监控"
     }
     try:
         resp = requests.get(url, params=params, timeout=5)
@@ -71,34 +93,40 @@ def send_bark_notification(title, content):
         print(f"推送失败: {e}")
 
 def main():
-    # 1. 获取上次记录的 TID (从 GitHub Secrets 或 本地文件模拟)
-    # 在 GitHub Actions 环境中，我们利用 Artifact 或 简单的文件读写来记录状态
-    last_tid = ""
+    # 1. 获取上次记录的标识 (格式: "tid|时间")
+    last_record = ""
     if os.path.exists(RECORD_FILE):
         with open(RECORD_FILE, "r", encoding="utf-8") as f:
-            last_tid = f.read().strip()
+            last_record = f.read().strip()
     
-    # 2. 获取最新帖子
-    current_tid, current_title = get_latest_post()
+    # 2. 获取最新回复
+    current_tid, current_title, current_time = get_latest_reply()
     
     if not current_tid:
-        print("未能获取最新帖子信息")
+        print("未能获取最新回复信息")
         return
 
-    print(f"当前最新帖 ID: {current_tid}, 标题: {current_title}")
-    print(f"上次记录 ID: {last_tid}")
+    # 构造当前记录标识：使用 tid + 时间 作为唯一键，防止同帖多次回复只提醒一次的问题
+    # 如果只想监测“在哪个帖子里回复了”，只用 tid 即可。
+    # 如果想监测“每一次回复”，建议用 tid + 时间
+    current_record = f"{current_tid}|{current_time}"
+    
+    print(f"当前最新回复: TID={current_tid}, 标题={current_title}, 时间={current_time}")
+    print(f"上次记录: {last_record}")
 
     # 3. 比对并发送
-    if current_tid != last_tid:
-        msg = f"NGA 用户 (UID:{TARGET_UID}) 发了新帖:\n{current_title}\n点击查看详情: https://bbs.nga.cn/read.php?tid={current_tid}"
-        send_bark_notification("🔔 NGA 新帖提醒", msg)
+    if current_record != last_record:
+        jump_url = f"https://bbs.nga.cn/read.php?tid={current_tid}"
+        msg = f"NGA 用户 (UID:{TARGET_UID}) 有了新回复!\n在帖子: {current_title}\n时间: {current_time}"
+        
+        send_bark_notification("💬 NGA 新回复提醒", msg, jump_url)
         
         # 更新记录文件
         with open(RECORD_FILE, "w", encoding="utf-8") as f:
-            f.write(current_tid)
+            f.write(current_record)
         print("记录已更新")
     else:
-        print("没有新帖")
+        print("没有新回复")
 
 if __name__ == "__main__":
     main()
