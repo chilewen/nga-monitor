@@ -6,7 +6,7 @@ from datetime import datetime
 
 # ================= 配置区域 (请修改这里) =================
 # 1. 你的 Bark 链接 (例如: https://api.day.app/xxxxxxxx)
-BARK_KEY = "https://api.day.app/你的KEY" 
+BARK_KEY = "https://api.day.app/H4TvmYKzupRxHAgrpTD65N" 
 
 # 2. 目标 NGA 用户的 UID (你要监控的用户)
 TARGET_UID = "26529713" 
