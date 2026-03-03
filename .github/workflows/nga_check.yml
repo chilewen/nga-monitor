@@ -42,8 +42,8 @@ jobs:
       
       - name: Commit and push if changed
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.email "chilewen@126.com"
+          git config --local user.name "wenzl"
           git add last_post_id.txt
           git diff --quiet && git diff --staged --quiet || git commit -m "Update last post ID"
           git push
