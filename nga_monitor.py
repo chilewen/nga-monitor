@@ -13,6 +13,11 @@ MONITOR_TASKS = [
         "name": "猫猫",
         "meta_file": "nga_monitor/45502551_370218_meta.json"
     },
+     {
+        "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=26529713",
+        "name": "小雨",
+        "meta_file": "nga_monitor/45502551_26529713_meta.json"
+    },
 ]
 
 BARK_KEY = os.getenv("BARK_KEY")
