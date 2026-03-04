@@ -12,12 +12,8 @@ MONITOR_TASKS = [
     {
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=26529713",
         "name": "小雨"
-    }
+    },
     # 可添加更多任务
-    # {
-    #     "url": "https://bbs.nga.cn/read.php?tid=123456&authorid=789012",
-    #     "name": "测试用户"
-    # },
 ]
 
 BARK_KEY = os.getenv("BARK_KEY")
@@ -105,9 +101,9 @@ def append_pushed_pids(task, pids):
     if DEBUG_MODE:
         print(f"[调试] 新增记录PID数量：{len(pids)}（文件：{file_path}）")
 
-# ===================== 核心函数：爬取单页（提取目标用户回复） =====================
+# ===================== 核心函数：爬取单页（修复回复块匹配） =====================
 def crawl_page(task, page):
-    """爬取指定页数（带详细调试，打印所有提取的回复）"""
+    """爬取指定页数（增加多套回复块匹配规则，兼容不同NGA页面结构）"""
     # 构造带页码的URL
     base_url = task["url"].split("&page=")[0] if "&page=" in task["url"] else task["url"]
     crawl_url = f"{base_url}&page={page}"
@@ -119,23 +115,45 @@ def crawl_page(task, page):
         response.encoding = "gbk"  # 强制NGA编码
         html = response.text
         
-        # 提取回复块
-        post_pattern = re.compile(
-            r'<table class=\'forumbox postbox\'[^>]*>[\s\S]*?</table>',
-            re.IGNORECASE
-        )
-        posts = post_pattern.findall(html)
-        if DEBUG_MODE:
-            print(f"[调试] 第{page}页提取到回复块数量：{len(posts)}")
+        # 修复：增加多套回复块匹配规则（兼容不同结构）
+        post_patterns = [
+            # 规则1：原有的forumbox postbox
+            re.compile(r'<table class=\'forumbox postbox\'[^>]*>[\s\S]*?</table>', re.IGNORECASE),
+            # 规则2：简化的postbox（无forumbox）
+            re.compile(r'<table class=\'postbox\'[^>]*>[\s\S]*?</table>', re.IGNORECASE),
+            # 规则3：div结构的postrow（部分页面使用）
+            re.compile(r'<div class=\'postrow\'[^>]*>[\s\S]*?</div>', re.IGNORECASE),
+            # 规则4：带id的postcontainer（兜底）
+            re.compile(r'<div id=\'postcontainer\d+\'[^>]*>[\s\S]*?</div>', re.IGNORECASE)
+        ]
+        
+        # 遍历所有规则，直到匹配到回复块
+        posts = []
+        for pattern in post_patterns:
+            posts = pattern.findall(html)
+            if posts:
+                if DEBUG_MODE:
+                    print(f"[调试] 第{page}页：使用规则{post_patterns.index(pattern)+1}匹配到回复块数量：{len(posts)}")
+                break
+        
+        if not posts:
+            if DEBUG_MODE:
+                print(f"[调试] 第{page}页：所有规则均未匹配到回复块")
+                # 打印页面关键片段（帮助后续优化匹配规则）
+                print(f"[调试] 页面关键片段：{html[:2000]}")
+            return []
         
         replies = []
         for idx, post in enumerate(posts):
-            # 提取核心信息
-            pid_match = re.search(r'pid(\d+)Anchor', post)
-            time_match = re.search(r'title=\'reply time\'>(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post)
-            content_match = re.search(r'class=\'postcontent ubbcode\'>([\s\S]*?)</span>', post)
+            # 提取核心信息（兼容不同格式）
+            # PID匹配（两种格式：pidXXXAnchor / id="pidXXX"）
+            pid_match = re.search(r'pid(\d+)Anchor', post) or re.search(r'id="pid(\d+)"', post)
+            # 时间匹配（两种格式：title='reply time' / 直接显示时间）
+            time_match = re.search(r'title=\'reply time\'>(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post) or re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post)
+            # 内容匹配（两种格式：postcontent ubbcode / message）
+            content_match = re.search(r'class=\'postcontent ubbcode\'>([\s\S]*?)</span>', post) or re.search(r'class=\'message\'>([\s\S]*?)</div>', post)
             
-            # 调试：打印单个回复块
+            # 调试：打印单个回复块关键信息
             if DEBUG_MODE:
                 print(f"\n[调试] 第{page}页回复块{idx+1}：")
                 print(f"  PID匹配结果：{pid_match.group(1) if pid_match else '无'}")
@@ -147,13 +165,21 @@ def crawl_page(task, page):
                     print(f"[调试] 第{page}页回复块{idx+1}：无效，跳过")
                 continue
             
-            # 清理内容
+            # 清理内容（保留核心文本，去掉引用、标签等冗余信息）
             pid = pid_match.group(1)
             reply_time = time_match.group(1) if time_match else "1970-01-01 00:00"
             content = content_match.group(1)
-            content = re.sub(r"<.*?>", "", content)  # 去掉HTML标签
-            content = re.sub(r"\[img\].*?\[/img\]", "[图片]", content)  # 替换图片
-            content = re.sub(r"\s+", " ", content).strip()  # 清理空格
+            # 去掉HTML标签
+            content = re.sub(r"<.*?>", "", content)
+            # 去掉引用块 [quote]...[/quote]
+            content = re.sub(r"\[quote\][\s\S]*?\[/quote\]", "", content)
+            # 去掉图片标签
+            content = re.sub(r"\[img\].*?\[/img\]", "[图片]", content)
+            # 清理多余空格和特殊字符
+            content = re.sub(r"\s+", " ", content).strip()
+            # 过滤过短的无效内容
+            if len(content) < 3:
+                continue
             
             reply = {
                 "pid": pid,
@@ -172,7 +198,7 @@ def crawl_page(task, page):
         print(f"[错误] 爬取第{page}页失败：{str(e)}")
         return []
 
-# ===================== 核心函数：遍历所有页（从起始页到无内容为止） =====================
+# ===================== 核心函数：遍历所有页 =====================
 def crawl_all_pages(task):
     """遍历所有页（从上次页数+1开始，直到连续N页无回复）"""
     start_page = load_last_page(task) + 1  # 从上次页数的下一页开始
@@ -211,37 +237,47 @@ def crawl_all_pages(task):
     
     return all_replies, last_crawled_page
 
-# ===================== 推送函数（带调试） =====================
+# ===================== 推送函数（修复404错误） =====================
 def push(task, reply):
-    """推送回复到Bark（带调试）"""
+    """推送回复到Bark（使用params传参，处理特殊字符）"""
     if not BARK_KEY:
         print("[调试] 跳过推送：BARK_KEY未配置")
         return
     
-    # 构造推送内容
+    # 构造推送内容（简化标题，清理内容）
     task_key = get_task_key(task)
     tid = task_key.split('_')[0]
     title = f"【NGA-{tid}】{task['name']} 新回复"
-    content = reply["content"][:300] if len(reply["content"]) > 300 else reply["content"]
-    bark_url = f"https://api.day.app/{BARK_KEY}/{title}/{content}"
+    # 内容进一步截断，避免超出Bark限制
+    content = reply["content"][:200] + "..." if len(reply["content"]) > 200 else reply["content"]
     
     if DEBUG_MODE:
         print(f"\n[调试] 开始推送：")
         print(f"  推送标题：{title}")
-        print(f"  推送内容：{content[:100]}...")
+        print(f"  推送内容：{content}")
+    
+    # 修复：使用params传参，自动编码特殊字符
+    bark_api = f"https://api.day.app/{BARK_KEY}/"
+    params = {
+        "title": title,
+        "body": content,
+        "url": f"https://bbs.nga.cn/read.php?tid={tid}#pid{reply['pid']}Anchor",  # 跳转链接
+        "isArchive": 1
+    }
     
     try:
-        response = requests.get(bark_url, timeout=10)
-        if response.status_code == 200 and response.json().get("code") == 200:
+        response = requests.get(bark_api, params=params, timeout=10)
+        response_data = response.json()
+        if response.status_code == 200 and response_data.get("code") == 200:
             print(f"✅ 推送成功 | PID={reply['pid']} | 页码={reply['page']}")
         else:
-            print(f"❌ 推送失败 | 状态码={response.status_code} | 响应={response.text}")
+            print(f"❌ 推送失败 | 状态码={response.status_code} | 响应={response_data}")
     except Exception as e:
         print(f"❌ 推送异常 | 错误={str(e)}")
 
 # ===================== 单任务执行（核心逻辑） =====================
 def run_task(task):
-    """执行单个监控任务（遍历所有页+精准取最新3条）"""
+    """执行单个监控任务"""
     print("\n" + "="*80)
     print(f"开始执行任务：{task['name']}")
     print(f"任务URL：{task['url']}")
@@ -256,7 +292,6 @@ def run_task(task):
     
     # 3. 按时间/PID倒序排序（保证最新回复在前）
     if new_replies:
-        # 优先按时间排序，时间相同按PID排序
         new_replies.sort(key=lambda x: (x["time"], x["pid"]), reverse=True)
         print(f"\n📊 筛选出新回复数量：{len(new_replies)}（按时间倒序排序）")
         
@@ -267,18 +302,15 @@ def run_task(task):
                 print(f"  {idx+1}. PID={r['pid']} | 时间={r['time']} | 页码={r['page']}")
     else:
         print(f"\nℹ️ 未发现新回复，无需推送")
-        # 保存本次爬取的最后页数
         save_last_page(task, last_crawled_page)
         return
     
     # 4. 处理推送逻辑
     is_first_run = len(pushed_pids) == 0
     if is_first_run:
-        # 首次运行：只推送最新3条
         push_list = new_replies[:FIRST_RUN_PUSH_LIMIT]
         print(f"\n🎯 首次运行：推送最新{len(push_list)}条回复（共{len(new_replies)}条新回复）")
     else:
-        # 非首次运行：推送所有新回复
         push_list = new_replies
         print(f"\n🎯 非首次运行：推送全部{len(push_list)}条新回复")
     
