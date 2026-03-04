@@ -1,43 +1,35 @@
 name: NGA帖子监控推送
 
 on:
-  # 定时执行（每10分钟一次，可自行调整）
+  # 定时执行（每5分钟一次，可自行调整）
   schedule:
-    - cron: '*/10 * * * *'
+    - cron: '*/5 * * * *'
   # 手动触发（方便测试）
   workflow_dispatch:
 
 jobs:
-  monitor:
+  run-nga-monitor:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 必须：允许修改/提交仓库文件
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
-
-      - name: 设置Python环境
+        with:
+          fetch-depth: 0  # 拉取所有历史，避免提交冲突
+      
+      - name: 设置Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-
+          python-version: "3.10"
+      
       - name: 安装依赖
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests
-
+        run: pip install requests
+      
       - name: 运行监控脚本
         env:
-          # 敏感信息：从Secrets读取
-          BARK_KEY: ${{ secrets.BARK_KEY }}
-          NGA_COOKIE: ${{ secrets.NGA_COOKIE }}
-          # 非敏感配置：从Variables读取（核心改动）
-          NGA_POST_URL: ${{ vars.NGA_POST_URL }}
-          TARGET_USER: ${{ vars.TARGET_USER }}
-        run: |
-          python nga_monitor.py
-
-      - name: 保存已推送记录（避免重复推送）
-        uses: actions/upload-artifact@v4
-        with:
-          name: pushed-replies
-          path: pushed_replies.txt
-          retention-days: 90  # 记录保留90天
+          BARK_KEY: ${{ secrets.BARK_KEY }}  # 存在GitHub Secrets中
+          NGA_COOKIE: ${{ secrets.NGA_COOKIE }}  # 存在GitHub Secrets中
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Actions自动注入，无需手动设置
+          GITHUB_REPOSITORY: ${{ github.repository }}  # 自动注入仓库名
+        run: python your_script_name.py  # 替换为你的脚本名
