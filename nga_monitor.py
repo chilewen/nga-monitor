@@ -12,6 +12,9 @@ NGA_COOKIE = os.getenv("NGA_COOKIE")
 RECORD_FILE = "pushed_replies.txt"
 # 新增配置：强制爬取页数（解决帖子页数多的问题）
 FORCE_CRAWL_PAGES = int(os.getenv("FORCE_CRAWL_PAGES", 10))  # 默认爬10页，可通过环境变量调整
+# 调试配置：是否保存完整页面内容到文件
+SAVE_FULL_HTML = True
+FULL_HTML_FILE = "nga_page_1.html"
 
 # 请求头（模拟浏览器，携带登录态）
 HEADERS = {
@@ -65,13 +68,13 @@ def check_login_status(html):
         return False
     return True
 
-# ===================== 核心：爬取单页（增强版） =====================
+# ===================== 核心：爬取单页（完整内容打印版） =====================
 def crawl_one_page(url):
     """
-    爬取单页内容，增强版提取逻辑
-    - 扩大内容搜索范围
-    - 增加多种PID/内容/用户名提取规则
-    - 输出更多调试信息
+    爬取单页内容，第一页打印完整HTML内容
+    - 完整打印第一页HTML
+    - 保存第一页HTML到本地文件
+    - 增强版提取逻辑
     """
     target_replies = []
     try:
@@ -88,17 +91,28 @@ def crawl_one_page(url):
         html = response.text
         page_num = url.split("page=")[-1] if "page=" in url else "1"
         
+        # ========== 关键：第一页打印完整内容 + 保存到文件 ==========
+        if page_num == "1":
+            print(f"\n{'='*80}")
+            print(f"📄 第1页完整HTML内容开始（共{len(html)}字符）：")
+            print(f"{'='*80}")
+            print(html)
+            print(f"{'='*80}")
+            print(f"📄 第1页完整HTML内容结束")
+            print(f"{'='*80}")
+            
+            # 保存到本地文件
+            if SAVE_FULL_HTML:
+                with open(FULL_HTML_FILE, "w", encoding="utf-8") as f:
+                    f.write(html)
+                print(f"\n💾 第1页完整HTML已保存到文件：{os.path.abspath(FULL_HTML_FILE)}")
+        
         # ========== 调试日志：增强版 ==========
         print(f"\n===== 第 {page_num} 页调试信息 =====")
         print(f"📥 页面URL：{url}")
         print(f"📏 页面内容长度：{len(html)} 字符")
         print(f"🔤 页面编码：{response.encoding}")
         print(f"🔓 登录状态：{'已登录' if check_login_status(html) else '未登录'}")
-        
-        # 输出页面中间部分（找回复内容，不再只看前1000字符）
-        mid_start = max(0, len(html)//2 - 500)
-        mid_end = min(len(html), len(html)//2 + 500)
-        print(f"📝 页面中间1000字符（找回复内容）：\n{html[mid_start:mid_end]}")
         
         # 搜索页面中所有UID，确认是否有目标UID
         all_uids = re.findall(r'userClick\(event,[""](\d+)[""]\)', html)
