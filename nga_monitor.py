@@ -7,15 +7,15 @@ from datetime import datetime
 BARK_KEY = os.getenv("BARK_KEY")
 NGA_POST_URL = os.getenv("NGA_POST_URL")
 TARGET_USER = os.getenv("TARGET_USER")
-NGA_COOKIE = os.getenv("NGA_COOKIE")  # 新增：NGA登录Cookie
+NGA_COOKIE = os.getenv("NGA_COOKIE")
 # 记录已推送的回复ID文件
 RECORD_FILE = "pushed_replies.txt"
 
 # 请求头（模拟浏览器，携带登录Cookie）
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Cookie": NGA_COOKIE or "",  # 新增：携带Cookie
-    "Referer": "https://bbs.nga.cn/",  # 新增：补充Referer，降低反爬概率
+    "Cookie": NGA_COOKIE or "",
+    "Referer": "https://bbs.nga.cn/",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"
 }
 
@@ -23,92 +23,134 @@ def load_pushed_replies():
     """加载已推送的回复ID"""
     if os.path.exists(RECORD_FILE):
         with open(RECORD_FILE, "r", encoding="utf-8") as f:
-            return set(f.read().splitlines())
+            pushed_ids = set(f.read().splitlines())
+            print(f"✅ 加载到已推送的回复ID数量：{len(pushed_ids)}")
+            return pushed_ids
+    print("⚠️  首次运行，无已推送记录，将初始化历史ID")
     return set()
 
-def save_pushed_reply(reply_id):
-    """保存已推送的回复ID"""
-    with open(RECORD_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{reply_id}\n")
+def save_pushed_reply(reply_ids):
+    """批量保存回复ID（适配首次初始化）"""
+    # 去重后写入
+    existing_ids = load_pushed_replies()
+    new_ids = [rid for rid in reply_ids if rid not in existing_ids]
+    if new_ids:
+        with open(RECORD_FILE, "a", encoding="utf-8") as f:
+            f.write("\n".join(new_ids) + "\n")
+        print(f"✅ 已记录 {len(new_ids)} 个回复ID到文件")
 
 def check_login_status(html):
-    """检查是否登录成功（简单校验）"""
-    # 未登录时页面会包含"请登录后查看"或"登录"按钮
-    if "请登录后查看" in html or "登录" in html and "退出" not in html:
-        print("⚠️  Cookie 可能失效，未登录成功！")
+    """检查是否登录成功"""
+    if "请登录后查看" in html or ("登录" in html and "退出" not in html):
+        print("❌ Cookie 可能失效，未登录成功！")
+        print(f"📝 页面关键内容片段：{html[:500]}")  # 输出页面开头，方便调试
         return False
     return True
 
 def crawl_nga_post():
-    """爬取NGA帖子（带登录态），提取目标用户的新发言"""
+    """爬取NGA帖子，返回目标用户的所有发言+首次运行标记"""
+    all_target_replies = []  # 目标用户的所有发言
+    is_first_run = not os.path.exists(RECORD_FILE)  # 是否首次运行
+
     try:
-        # 会话保持，模拟真实浏览器的请求状态
         session = requests.Session()
         response = session.get(NGA_POST_URL, headers=HEADERS, timeout=15)
         response.encoding = "utf-8"
         html = response.text
 
+        # 打印页面长度，确认是否爬取到内容
+        print(f"📥 爬取到页面内容长度：{len(html)} 字符")
+
         # 检查登录状态
         if not check_login_status(html):
-            return []
+            return [], is_first_run
 
-        # 优化正则：适配NGA登录后的页面结构
+        # 优化正则：适配NGA更通用的结构（优先匹配postid、author、content）
+        # 正则说明：
+        # 1. id="post(\d+)" 匹配回复ID
+        # 2. class="author">([^<]+)</a> 匹配用户名（排除标签）
+        # 3. postcontent ubbcode">([\s\S]*?)</div> 匹配回复内容
         pattern = re.compile(
-            r'<div id="post(\d+)" class="post.*?'  # 先匹配回复ID
-            r'<a href="home.php\?mod=space&amp;uid=\d+" class="author">(.*?)</a>.*?'  # 用户名
-            r'<div class="postcontent ubbcode">(.*?)</div>',  # 回复内容
-            re.DOTALL
+            r'id="post(\d+)"[^>]*?>.*?'
+            r'<a[^>]+class="author"[^>]*>([^<]+)</a>.*?'
+            r'<div class="postcontent ubbcode">([\s\S]*?)</div>',
+            re.DOTALL | re.IGNORECASE
         )
         matches = pattern.findall(html)
+        print(f"🔍 正则匹配到的总回复数：{len(matches)}")
 
-        new_replies = []
-        pushed_ids = load_pushed_replies()
-
+        # 筛选目标用户的发言
         for reply_id, username, content in matches:
-            # 过滤目标用户、未推送的回复
-            if username == TARGET_USER and reply_id not in pushed_ids:
-                # 清理HTML标签和多余空格，提取纯文本
+            username = username.strip()
+            if username == TARGET_USER:
+                # 清理内容：移除HTML标签、多余空格
                 content = re.sub(r'<.*?>', '', content).strip()
-                content = re.sub(r'\s+', ' ', content)  # 合并多空格为单空格
+                content = re.sub(r'\s+', ' ', content)
+                # 过滤空内容
                 if content:
-                    new_replies.append({
+                    reply_info = {
                         "id": reply_id,
                         "username": username,
                         "content": content,
                         "url": f"{NGA_POST_URL}#post{reply_id}"
-                    })
-                    # 标记为已推送
-                    save_pushed_reply(reply_id)
+                    }
+                    all_target_replies.append(reply_info)
 
-        return new_replies
+        print(f"👤 匹配到目标用户 {TARGET_USER} 的发言数：{len(all_target_replies)}")
+        return all_target_replies, is_first_run
 
     except requests.exceptions.RequestException as e:
-        print(f"网络请求失败：{e}")
-        return []
+        print(f"❌ 网络请求失败：{type(e).__name__} - {e}")
+        return [], is_first_run
     except Exception as e:
-        print(f"爬取失败：{e}")
-        return []
+        print(f"❌ 爬取异常：{type(e).__name__} - {e}")
+        import traceback
+        print(f"📝 异常堆栈：{traceback.format_exc()[:1000]}")  # 输出堆栈，方便调试
+        return [], is_first_run
+
+def process_replies(all_replies, is_first_run):
+    """处理发言：首次运行记录所有ID，非首次推送新回复"""
+    pushed_ids = load_pushed_replies()
+    new_replies = []
+
+    if is_first_run:
+        # 首次运行：记录所有历史ID，仅推送最新1条（可选）
+        if all_replies:
+            # 按回复ID排序（数字越大越新）
+            sorted_replies = sorted(all_replies, key=lambda x: int(x['id']), reverse=True)
+            # 记录所有ID
+            all_ids = [r['id'] for r in sorted_replies]
+            save_pushed_reply(all_ids)
+            # 仅推送最新1条（避免首次推送大量历史消息）
+            new_replies = [sorted_replies[0]]
+            print(f"🚀 首次运行：记录 {len(all_ids)} 个历史ID，推送最新1条")
+    else:
+        # 非首次运行：推送未记录的新回复
+        for reply in all_replies:
+            if reply['id'] not in pushed_ids:
+                new_replies.append(reply)
+                save_pushed_reply([reply['id']])  # 实时记录
+
+    return new_replies
 
 def send_to_bark(reply):
     """推送消息到Bark App"""
     if not BARK_KEY:
-        print("BARK_KEY未配置")
+        print("❌ BARK_KEY未配置")
         return
 
     bark_url = f"https://api.day.app/{BARK_KEY}/"
-    title = f"NGA新回复 - {reply['username']}"
-    # 限制内容长度，避免Bark推送超限
-    content = reply['content'][:300] if len(reply['content']) > 300 else reply['content']
+    title = f"{'【首次初始化】' if not os.path.exists(RECORD_FILE) else '【新回复】'}NGA - {reply['username']}"
+    content = reply['content'][:300]
     url = reply['url']
 
-    # 构造Bark推送参数（增加铃声和图标，提升辨识度）
     params = {
         "title": title,
         "body": content,
         "url": url,
-        "isArchive": 1,  # 保存到Bark历史
-        "sound": "bell.caf",  # 推送铃声
-        "icon": "https://img.nga.178.com/ngabbs/favicon.ico"  # NGA图标
+        "isArchive": 1,
+        "sound": "bell.caf",
+        "icon": "https://img.nga.178.com/ngabbs/favicon.ico"
     }
 
     try:
@@ -116,18 +158,30 @@ def send_to_bark(reply):
         if response.status_code == 200:
             print(f"✅ 推送成功：回复ID {reply['id']}")
         else:
-            print(f"❌ 推送失败：{response.text}")
+            print(f"❌ 推送失败：{response.status_code} - {response.text}")
     except Exception as e:
-        print(f"❌ 推送异常：{e}")
+        print(f"❌ 推送异常：{type(e).__name__} - {e}")
 
 if __name__ == "__main__":
-    print(f"📌 开始监控 NGA 帖子：{NGA_POST_URL}")
+    print(f"\n=== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始监控 ===")
+    print(f"📌 监控帖子：{NGA_POST_URL}")
     print(f"👤 监控用户：{TARGET_USER}")
-    new_replies = crawl_nga_post()
-    
+
+    # 爬取所有目标发言 + 判断是否首次运行
+    all_target_replies, is_first_run = crawl_nga_post()
+
+    # 处理发言（初始化/推送新回复）
+    new_replies = process_replies(all_target_replies, is_first_run)
+
+    # 推送新回复
     if new_replies:
-        print(f"🎉 发现 {len(new_replies)} 条新回复")
+        print(f"🎉 待推送新回复数：{len(new_replies)}")
         for reply in new_replies:
             send_to_bark(reply)
     else:
-        print("ℹ️  无新回复或爬取异常")
+        if not all_target_replies:
+            print("ℹ️  未匹配到目标用户的发言（或爬取异常）")
+        else:
+            print("ℹ️  无新回复（所有发言已记录）")
+
+    print(f"=== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 监控结束 ===\n")
