@@ -4,9 +4,10 @@ import os
 from datetime import datetime
 
 # 配置项（从环境变量读取）
+# TARGET_USER 现在存储的是用户ID（uid），如 "123456"
 BARK_KEY = os.getenv("BARK_KEY")
 NGA_POST_URL = os.getenv("NGA_POST_URL")
-TARGET_USER = os.getenv("TARGET_USER")
+TARGET_USER_UID = os.getenv("TARGET_USER")  # 重命名变量更清晰（值是用户ID）
 NGA_COOKIE = os.getenv("NGA_COOKIE")
 # 记录已推送的回复ID文件
 RECORD_FILE = "pushed_replies.txt"
@@ -48,8 +49,8 @@ def check_login_status(html):
     return True
 
 def crawl_nga_post():
-    """爬取NGA帖子，返回目标用户的所有发言+首次运行标记"""
-    all_target_replies = []  # 目标用户的所有发言
+    """爬取NGA帖子，返回目标用户ID的所有发言+首次运行标记"""
+    all_target_replies = []  # 目标用户ID的所有发言
     is_first_run = not os.path.exists(RECORD_FILE)  # 是否首次运行
 
     try:
@@ -65,24 +66,28 @@ def crawl_nga_post():
         if not check_login_status(html):
             return [], is_first_run
 
-        # 优化正则：适配NGA更通用的结构（优先匹配postid、author、content）
+        # 核心修改：正则匹配 回复ID + 用户ID(uid) + 用户名 + 回复内容
         # 正则说明：
         # 1. id="post(\d+)" 匹配回复ID
-        # 2. class="author">([^<]+)</a> 匹配用户名（排除标签）
-        # 3. postcontent ubbcode">([\s\S]*?)</div> 匹配回复内容
+        # 2. home.php\?mod=space&amp;uid=(\d+) 匹配用户ID(uid)
+        # 3. class="author">([^<]+)</a> 匹配用户名（仅用于推送显示）
+        # 4. postcontent ubbcode">([\s\S]*?)</div> 匹配回复内容
         pattern = re.compile(
             r'id="post(\d+)"[^>]*?>.*?'
-            r'<a[^>]+class="author"[^>]*>([^<]+)</a>.*?'
+            r'<a[^>]+href="home\.php\?mod=space&amp;uid=(\d+)"[^>]*?>.*?'
+            r'<span class="author">([^<]+)</span>.*?'  # 或 class="author">([^<]+)</a>
             r'<div class="postcontent ubbcode">([\s\S]*?)</div>',
             re.DOTALL | re.IGNORECASE
         )
         matches = pattern.findall(html)
         print(f"🔍 正则匹配到的总回复数：{len(matches)}")
 
-        # 筛选目标用户的发言
-        for reply_id, username, content in matches:
-            username = username.strip()
-            if username == TARGET_USER:
+        # 筛选目标用户ID的发言（核心修改：匹配uid而非用户名）
+        for reply_id, user_uid, username, content in matches:
+            user_uid = user_uid.strip()  # 用户ID（数字字符串）
+            username = username.strip()  # 用户名（仅用于推送标题显示）
+            # 匹配目标用户ID（你的TARGET_USER变量值）
+            if user_uid == TARGET_USER_UID:
                 # 清理内容：移除HTML标签、多余空格
                 content = re.sub(r'<.*?>', '', content).strip()
                 content = re.sub(r'\s+', ' ', content)
@@ -90,13 +95,14 @@ def crawl_nga_post():
                 if content:
                     reply_info = {
                         "id": reply_id,
-                        "username": username,
+                        "uid": user_uid,
+                        "username": username,  # 保留用户名用于推送显示
                         "content": content,
                         "url": f"{NGA_POST_URL}#post{reply_id}"
                     }
                     all_target_replies.append(reply_info)
 
-        print(f"👤 匹配到目标用户 {TARGET_USER} 的发言数：{len(all_target_replies)}")
+        print(f"👤 匹配到目标用户ID {TARGET_USER_UID} 的发言数：{len(all_target_replies)}")
         return all_target_replies, is_first_run
 
     except requests.exceptions.RequestException as e:
@@ -134,13 +140,14 @@ def process_replies(all_replies, is_first_run):
     return new_replies
 
 def send_to_bark(reply):
-    """推送消息到Bark App"""
+    """推送消息到Bark App（显示用户名+用户ID）"""
     if not BARK_KEY:
         print("❌ BARK_KEY未配置")
         return
 
     bark_url = f"https://api.day.app/{BARK_KEY}/"
-    title = f"{'【首次初始化】' if not os.path.exists(RECORD_FILE) else '【新回复】'}NGA - {reply['username']}"
+    # 推送标题：显示用户名+用户ID，更清晰
+    title = f"{'【首次初始化】' if not os.path.exists(RECORD_FILE) else '【新回复】'}NGA - {reply['username']}(UID:{reply['uid']})"
     content = reply['content'][:300]
     url = reply['url']
 
@@ -165,7 +172,7 @@ def send_to_bark(reply):
 if __name__ == "__main__":
     print(f"\n=== {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} 开始监控 ===")
     print(f"📌 监控帖子：{NGA_POST_URL}")
-    print(f"👤 监控用户：{TARGET_USER}")
+    print(f"👤 监控用户ID：{TARGET_USER_UID}")  # 日志显示用户ID
 
     # 爬取所有目标发言 + 判断是否首次运行
     all_target_replies, is_first_run = crawl_nga_post()
@@ -180,7 +187,7 @@ if __name__ == "__main__":
             send_to_bark(reply)
     else:
         if not all_target_replies:
-            print("ℹ️  未匹配到目标用户的发言（或爬取异常）")
+            print("ℹ️  未匹配到目标用户ID的发言（或爬取异常）")
         else:
             print("ℹ️  无新回复（所有发言已记录）")
 
