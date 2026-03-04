@@ -63,7 +63,7 @@ def check_login_status(html):
         return False
     return True
 
-# ===================== 核心：爬取单页（暴力提取版） =====================
+# ===================== 核心：爬取单页（修复编码和正则） =====================
 def crawl_one_page(url):
     """
     爬取单页内容，暴力提取目标UID的回复
@@ -79,7 +79,8 @@ def crawl_one_page(url):
             timeout=20,
             allow_redirects=True
         )
-        response.encoding = "utf-8"
+        # 关键修复1：自动识别编码（优先GBK，兼容NGA）
+        response.encoding = response.apparent_encoding if response.apparent_encoding else "GBK"
         html = response.text
         page_num = url.split("page=")[-1] if "page=" in url else "1"
         
@@ -87,6 +88,7 @@ def crawl_one_page(url):
         print(f"\n===== 第 {page_num} 页调试信息 =====")
         print(f"📥 页面URL：{url}")
         print(f"📏 页面内容长度：{len(html)} 字符")
+        print(f"🔤 页面编码：{response.encoding}")
         print(f"🔓 登录状态：{'已登录' if check_login_status(html) else '未登录'}")
         
         # 输出页面前1000字符（调试用，看真实爬取内容）
@@ -97,13 +99,17 @@ def crawl_one_page(url):
         if not check_login_status(html):
             return target_replies
         
-        # ========== 暴力提取逻辑（核心） ==========
-        # 1. 提取所有包含目标UID的位置
-        uid_pattern = re.compile(r'userClick\(event,&quot;(\d+)&quot;\)', re.IGNORECASE | re.DOTALL)
+        # ========== 暴力提取逻辑（核心修复） ==========
+        # 1. 提取所有包含目标UID的位置（修复正则，匹配原生引号和实体引号）
+        # 关键修复2：兼容两种引号格式，同时匹配数字UID
+        uid_pattern = re.compile(r'userClick\(event,["&quot;](\d+)["&quot;]\)', re.IGNORECASE | re.DOTALL)
         uid_matches = list(uid_pattern.finditer(html))
         
         if not uid_matches:
             print(f"ℹ️  第 {page_num} 页未找到任何用户UID")
+            # 额外调试：搜索页面中所有数字UID，确认是否有目标UID
+            all_uids = re.findall(r'userClick\(event,[""](\d+)[""]\)', html)
+            print(f"📌 页面中所有匹配到的UID列表：{list(set(all_uids))[:20]}")  # 只显示前20个去重UID
             return target_replies
         
         # 2. 遍历每个UID，只处理目标UID
