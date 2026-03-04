@@ -24,7 +24,8 @@ BARK_KEY = os.getenv("BARK_KEY")
 NGA_COOKIE = os.getenv("NGA_COOKIE")
 
 FIRST_RUN_PUSH_LIMIT = 3  # 首次只推最新3条
-DEBUG_MODE = True  # 调试模式：打印详细日志
+MAX_EMPTY_PAGES = 3       # 连续N页无回复则停止遍历
+DEBUG_MODE = True         # 调试模式：打印详细日志
 # =====================================================================
 
 # 请求头
@@ -38,10 +39,10 @@ HEADERS = {
     "Pragma": "no-cache"
 }
 
-# 确保记录目录存在
+# 确保记录目录存在（自动创建）
 os.makedirs("nga_monitor", exist_ok=True)
 
-# ===================== 工具函数：每个任务独立记录（强化调试） =====================
+# ===================== 工具函数：每个任务独立记录 =====================
 def get_task_key(task):
     """生成任务唯一标识：tid_authorid"""
     url = task["url"]
@@ -73,7 +74,7 @@ def load_last_page(task):
         return page_num
     if DEBUG_MODE:
         print(f"[调试] 未找到页数记录文件，首次运行（文件：{file_path}）")
-    return None  # 首次运行
+    return 0  # 首次运行从0开始（表示还没爬过任何页）
 
 def save_last_page(task, page):
     """保存本次爬取的最后页数（带调试）"""
@@ -104,56 +105,18 @@ def append_pushed_pids(task, pids):
     if DEBUG_MODE:
         print(f"[调试] 新增记录PID数量：{len(pids)}（文件：{file_path}）")
 
-# ===================== 核心函数：获取总页数（强化调试） =====================
-def get_total_page(task):
-    """获取帖子总页数（带详细调试）"""
-    url = task["url"]
-    if DEBUG_MODE:
-        print(f"\n[调试] 开始获取总页数，请求URL：{url}")
-    
-    try:
-        response = requests.get(url, headers=HEADERS, timeout=20)
-        response.encoding = "gbk"  # 强制NGA编码
-        html = response.text
-        
-        # 打印页面关键片段（定位总页数）
-        if DEBUG_MODE:
-            print(f"[调试] 页面状态码：{response.status_code}")
-            print(f"[调试] 页面关键片段（含页数）：{html[:1000]}")
-        
-        # 匹配总页数（多种规则兜底）
-        page_patterns = [
-            re.compile(r'共 (\d+) 页', re.IGNORECASE),
-            re.compile(r'page=(\d+).*?末页', re.IGNORECASE | re.DOTALL),
-            re.compile(r'最后一页.*?page=(\d+)', re.IGNORECASE)
-        ]
-        total_page = 1
-        for pattern in page_patterns:
-            match = pattern.search(html)
-            if match:
-                total_page = int(match.group(1))
-                break
-        
-        if DEBUG_MODE:
-            print(f"[调试] 识别到总页数：{total_page}")
-        return total_page
-    
-    except Exception as e:
-        print(f"[错误] 获取总页数失败：{str(e)}")
-        return 1
-
-# ===================== 核心函数：爬取单页（强化调试） =====================
+# ===================== 核心函数：爬取单页（提取目标用户回复） =====================
 def crawl_page(task, page):
     """爬取指定页数（带详细调试，打印所有提取的回复）"""
     # 构造带页码的URL
     base_url = task["url"].split("&page=")[0] if "&page=" in task["url"] else task["url"]
-    crawl_url = f"{base_url}&page={page}" if page > 1 else base_url
+    crawl_url = f"{base_url}&page={page}"
     if DEBUG_MODE:
         print(f"\n[调试] 开始爬取页面，页码：{page}，请求URL：{crawl_url}")
     
     try:
         response = requests.get(crawl_url, headers=HEADERS, timeout=20)
-        response.encoding = "gbk"
+        response.encoding = "gbk"  # 强制NGA编码
         html = response.text
         
         # 提取回复块
@@ -175,7 +138,6 @@ def crawl_page(task, page):
             # 调试：打印单个回复块
             if DEBUG_MODE:
                 print(f"\n[调试] 第{page}页回复块{idx+1}：")
-                print(f"  原始片段：{post[:500]}")
                 print(f"  PID匹配结果：{pid_match.group(1) if pid_match else '无'}")
                 print(f"  时间匹配结果：{time_match.group(1) if time_match else '无'}")
             
@@ -210,6 +172,45 @@ def crawl_page(task, page):
         print(f"[错误] 爬取第{page}页失败：{str(e)}")
         return []
 
+# ===================== 核心函数：遍历所有页（从起始页到无内容为止） =====================
+def crawl_all_pages(task):
+    """遍历所有页（从上次页数+1开始，直到连续N页无回复）"""
+    start_page = load_last_page(task) + 1  # 从上次页数的下一页开始
+    all_replies = []
+    empty_page_count = 0  # 连续空页面计数
+    current_page = start_page
+    
+    print(f"\n🚀 开始遍历页面：从第{start_page}页开始，连续{MAX_EMPTY_PAGES}页无回复则停止")
+    
+    while empty_page_count < MAX_EMPTY_PAGES:
+        # 爬取当前页
+        page_replies = crawl_page(task, current_page)
+        
+        if page_replies:
+            all_replies.extend(page_replies)
+            empty_page_count = 0  # 重置空页面计数
+            print(f"✅ 第{current_page}页：爬取到{len(page_replies)}条有效回复")
+        else:
+            empty_page_count += 1
+            print(f"ℹ️ 第{current_page}页：无有效回复（连续空页{empty_page_count}/{MAX_EMPTY_PAGES}）")
+        
+        current_page += 1
+    
+    # 计算本次爬取的最后有效页数
+    last_crawled_page = current_page - empty_page_count - 1
+    if last_crawled_page < start_page:
+        last_crawled_page = start_page - 1  # 无任何有效页面
+    
+    # 调试：打印遍历结果
+    if DEBUG_MODE:
+        print(f"\n[调试] 遍历完成：")
+        print(f"  起始页码：{start_page}")
+        print(f"  最后爬取页码：{current_page - 1}")
+        print(f"  最后有效页码：{last_crawled_page}")
+        print(f"  累计提取回复数量：{len(all_replies)}")
+    
+    return all_replies, last_crawled_page
+
 # ===================== 推送函数（带调试） =====================
 def push(task, reply):
     """推送回复到Bark（带调试）"""
@@ -218,8 +219,9 @@ def push(task, reply):
         return
     
     # 构造推送内容
-    task_name = task["name"]
-    title = f"【NGA-{get_task_key(task).split('_')[0]}】{task_name} 新回复"
+    task_key = get_task_key(task)
+    tid = task_key.split('_')[0]
+    title = f"【NGA-{tid}】{task['name']} 新回复"
     content = reply["content"][:300] if len(reply["content"]) > 300 else reply["content"]
     bark_url = f"https://api.day.app/{BARK_KEY}/{title}/{content}"
     
@@ -227,7 +229,6 @@ def push(task, reply):
         print(f"\n[调试] 开始推送：")
         print(f"  推送标题：{title}")
         print(f"  推送内容：{content[:100]}...")
-        print(f"  Bark请求URL：{bark_url}")
     
     try:
         response = requests.get(bark_url, timeout=10)
@@ -238,93 +239,68 @@ def push(task, reply):
     except Exception as e:
         print(f"❌ 推送异常 | 错误={str(e)}")
 
-# ===================== 单任务执行（核心逻辑，强化调试） =====================
+# ===================== 单任务执行（核心逻辑） =====================
 def run_task(task):
-    """执行单个监控任务（带完整调试日志）"""
+    """执行单个监控任务（遍历所有页+精准取最新3条）"""
     print("\n" + "="*80)
     print(f"开始执行任务：{task['name']}")
     print(f"任务URL：{task['url']}")
     print("="*80)
     
-    # 1. 加载上次页数 + 获取总页数
-    last_page = load_last_page(task)
-    total_page = get_total_page(task)
+    # 1. 遍历所有页（从上次页数+1开始）
+    all_replies, last_crawled_page = crawl_all_pages(task)
     
-    # 关键调试：打印核心页数信息
-    print(f"\n📌 核心页数信息（重点关注）：")
-    print(f"   帖子总页数：{total_page}")
-    print(f"   上次爬取页数：{last_page if last_page else '首次运行'}")
-    print(f"   本次爬取目标：{'最后一页（首次运行）' if last_page is None else f'第{last_page+1}页 → 第{total_page}页'}")
+    # 2. 加载已推送的PID，筛选新回复
+    pushed_pids = load_pushed_pids(task)
+    new_replies = [r for r in all_replies if r["pid"] not in pushed_pids]
     
-    # 2. 首次运行逻辑（只爬最后一页）
-    if last_page is None:
-        print("\n🚀 首次运行模式：只爬最后一页，提取最新3条")
-        # 爬取最后一页
-        last_page_replies = crawl_page(task, total_page)
+    # 3. 按时间/PID倒序排序（保证最新回复在前）
+    if new_replies:
+        # 优先按时间排序，时间相同按PID排序
+        new_replies.sort(key=lambda x: (x["time"], x["pid"]), reverse=True)
+        print(f"\n📊 筛选出新回复数量：{len(new_replies)}（按时间倒序排序）")
         
-        # 调试：打印最后一页所有回复
-        print(f"\n📊 最后一页（第{total_page}页）爬取结果：")
-        print(f"   提取到回复数量：{len(last_page_replies)}")
-        if last_page_replies:
-            print(f"   回复列表（按PID倒序）：")
-            # 按PID倒序（保证最新在前）
-            last_page_replies.sort(key=lambda x: x["pid"], reverse=True)
-            for idx, r in enumerate(last_page_replies):
-                print(f"     {idx+1}. PID={r['pid']} | 时间={r['time']} | 页码={r['page']}")
-        
-        # 筛选要推送的3条
-        push_list = last_page_replies[:FIRST_RUN_PUSH_LIMIT]
-        # 记录最后页数（总页数）
-        save_last_page(task, total_page)
-    
-    # 3. 非首次运行（增量爬取）
+        # 调试：打印新回复列表
+        if DEBUG_MODE:
+            print(f"\n[调试] 新回复列表（前10条）：")
+            for idx, r in enumerate(new_replies[:10]):
+                print(f"  {idx+1}. PID={r['pid']} | 时间={r['time']} | 页码={r['page']}")
     else:
-        start_page = last_page + 1
-        end_page = total_page
-        
-        if start_page > end_page:
-            print("\nℹ️ 非首次运行：无新页面，无需爬取")
-            return
-        
-        print(f"\n🚀 增量爬取模式：第{start_page}页 → 第{end_page}页")
-        all_replies = []
-        # 爬取所有新页面
-        for page in range(start_page, end_page + 1):
-            page_replies = crawl_page(task, page)
-            all_replies.extend(page_replies)
-        
-        # 调试：打印增量爬取结果
-        print(f"\n📊 增量爬取结果：")
-        print(f"   累计提取回复数量：{len(all_replies)}")
-        if all_replies:
-            all_replies.sort(key=lambda x: x["pid"], reverse=True)
-            print(f"   最新回复前5条：")
-            for idx, r in enumerate(all_replies[:5]):
-                print(f"     {idx+1}. PID={r['pid']} | 时间={r['time']} | 页码={r['page']}")
-        
-        # 筛选未推送的回复
-        pushed_pids = load_pushed_pids(task)
-        push_list = [r for r in all_replies if r["pid"] not in pushed_pids]
-        # 记录最后页数（最新页）
-        save_last_page(task, end_page)
+        print(f"\nℹ️ 未发现新回复，无需推送")
+        # 保存本次爬取的最后页数
+        save_last_page(task, last_crawled_page)
+        return
     
-    # 4. 执行推送 + 记录PID
-    print(f"\n🎯 最终推送列表：")
+    # 4. 处理推送逻辑
+    is_first_run = len(pushed_pids) == 0
+    if is_first_run:
+        # 首次运行：只推送最新3条
+        push_list = new_replies[:FIRST_RUN_PUSH_LIMIT]
+        print(f"\n🎯 首次运行：推送最新{len(push_list)}条回复（共{len(new_replies)}条新回复）")
+    else:
+        # 非首次运行：推送所有新回复
+        push_list = new_replies
+        print(f"\n🎯 非首次运行：推送全部{len(push_list)}条新回复")
+    
+    # 执行推送
     if push_list:
-        print(f"   本次推送数量：{len(push_list)}")
         for idx, r in enumerate(push_list):
-            print(f"     {idx+1}. PID={r['pid']} | 页码={r['page']} | 时间={r['time']}")
+            print(f"\n--- 推送第{idx+1}条 ---")
             push(task, r)
+        
         # 记录已推送的PID
         append_pushed_pids(task, [r["pid"] for r in push_list])
-    else:
-        print(f"   无新回复需要推送")
+    
+    # 5. 保存本次爬取的最后页数
+    save_last_page(task, last_crawled_page)
 
 # ===================== 主入口 =====================
 if __name__ == "__main__":
     print(f"\n=== NGA多用户监控脚本启动 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     print(f"📝 调试模式：{'开启' if DEBUG_MODE else '关闭'}")
     print(f"📋 监控任务数量：{len(MONITOR_TASKS)}")
+    print(f"🔧 连续空页停止阈值：{MAX_EMPTY_PAGES}页")
+    print(f"🎯 首次推送限制：{FIRST_RUN_PUSH_LIMIT}条最新回复")
     
     # 遍历执行所有任务
     for task in MONITOR_TASKS:
