@@ -32,4 +32,4 @@ jobs:
           NGA_COOKIE: ${{ secrets.NGA_COOKIE }}  # 存在GitHub Secrets中
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Actions自动注入，无需手动设置
           GITHUB_REPOSITORY: ${{ github.repository }}  # 自动注入仓库名
-        run: python your_script_name.py  # 替换为你的脚本名
+        run: python nga_monitor.py  # 替换为你的脚本名
