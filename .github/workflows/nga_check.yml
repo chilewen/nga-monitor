@@ -1,25 +1,23 @@
-name: NGA帖子监控推送
-
+name: NGA监控-5分钟自触发
 on:
-  # 手动触发（方便测试）
-  workflow_dispatch:
-  
+  workflow_dispatch:  # 手动触发
+  repository_dispatch:  # API 触发
+
 jobs:
   run-nga-monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 必须：允许提交文件
+      contents: write
+      actions: write  # 新增：允许触发其他 workflow
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取完整历史
-          ref: main  # 明确拉取main分支
-        
-      - name: 切换到main分支并拉取最新代码
-        run: |
-          git checkout main
-          git pull origin main --allow-unrelated-histories
+          fetch-depth: 0
+          ref: main
+      
+      - name: 切换到main分支
+        run: git checkout main && git pull origin main --allow-unrelated-histories
       
       - name: 设置Python
         uses: actions/setup-python@v5
@@ -35,5 +33,16 @@ jobs:
           NGA_COOKIE: ${{ secrets.NGA_COOKIE }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
-          GITHUB_ACTIONS: "true"  # 标记为Actions环境
-        run: python nga_monitor.py  # 替换为你的脚本名
+          GITHUB_ACTIONS: "true"
+        run: python nga_monitor.py  # 你的脚本名
+
+      # 新增：等待5分钟后，触发自己（实现无限循环）
+      - name: 等待5分钟
+        run: sleep 300  # 300秒 = 5分钟
+
+      - name: 触发下一次运行
+        uses: peter-evans/repository-dispatch@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          event-type: trigger-nga
+          repository: ${{ github.repository }}
