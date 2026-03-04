@@ -26,10 +26,12 @@ jobs:
 
       - name: 运行监控脚本
         env:
+          # 敏感信息：从Secrets读取
           BARK_KEY: ${{ secrets.BARK_KEY }}
-          NGA_POST_URL: ${{ secrets.NGA_POST_URL }}
-          TARGET_USER: ${{ secrets.TARGET_USER }}
-          NGA_COOKIE: ${{ secrets.NGA_COOKIE }}  # 新增：传递Cookie
+          NGA_COOKIE: ${{ secrets.NGA_COOKIE }}
+          # 非敏感配置：从Variables读取（核心改动）
+          NGA_POST_URL: ${{ vars.NGA_POST_URL }}
+          TARGET_USER: ${{ vars.TARGET_USER }}
         run: |
           python nga_monitor.py
 
