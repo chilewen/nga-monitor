@@ -6,17 +6,23 @@ on:
     - cron: '*/5 * * * *'
   # 手动触发（方便测试）
   workflow_dispatch:
-
+  
 jobs:
   run-nga-monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write  # 必须：允许修改/提交仓库文件
+      contents: write  # 必须：允许提交文件
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取所有历史，避免提交冲突
+          fetch-depth: 0  # 拉取完整历史
+          ref: main  # 明确拉取main分支
+        
+      - name: 切换到main分支并拉取最新代码
+        run: |
+          git checkout main
+          git pull origin main --allow-unrelated-histories
       
       - name: 设置Python
         uses: actions/setup-python@v5
@@ -28,8 +34,9 @@ jobs:
       
       - name: 运行监控脚本
         env:
-          BARK_KEY: ${{ secrets.BARK_KEY }}  # 存在GitHub Secrets中
-          NGA_COOKIE: ${{ secrets.NGA_COOKIE }}  # 存在GitHub Secrets中
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # Actions自动注入，无需手动设置
-          GITHUB_REPOSITORY: ${{ github.repository }}  # 自动注入仓库名
+          BARK_KEY: ${{ secrets.BARK_KEY }}
+          NGA_COOKIE: ${{ secrets.NGA_COOKIE }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO: ${{ github.repository }}
+          GITHUB_ACTIONS: "true"  # 标记为Actions环境
         run: python nga_monitor.py  # 替换为你的脚本名
