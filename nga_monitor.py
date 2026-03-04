@@ -24,24 +24,18 @@ MAX_PAGE_LIMIT = 100
 MAX_RETRY_TIMES = 2
 # =====================================================================
 
-# ===================== GitHub文件操作修复（核心） =====================
+# ===================== GitHub文件操作 =====================
 def git_config_and_checkout():
-    """修复Actions分离头指针问题"""
     try:
-        # 配置Git用户
         subprocess.run(["git", "config", "--global", "user.name", "GitHub Actions"], check=True, capture_output=True)
         subprocess.run(["git", "config", "--global", "user.email", "actions@github.com"], check=True, capture_output=True)
-        
-        # 切换到main分支（适配分离头指针）
         subprocess.run(["git", "checkout", "main"], check=True, capture_output=True)
-        # 拉取最新代码（允许无关的历史，避免冲突）
         subprocess.run(["git", "pull", "origin", "main", "--allow-unrelated-histories"], check=True, capture_output=True)
         print("✅ Git配置+分支切换+拉取成功")
     except Exception as e:
         print(f"⚠️ Git配置/拉取警告（不影响本地保存）：{e}")
 
 def load_github_meta(meta_file_path):
-    """读取元数据文件（兼容首次创建）"""
     os.makedirs(os.path.dirname(meta_file_path), exist_ok=True)
     default_meta = {"last_page": 0, "pushed_pids": []}
     
@@ -54,7 +48,6 @@ def load_github_meta(meta_file_path):
                 print(f"✅ 读取元数据成功：{meta_file_path}")
             return meta
         else:
-            # 首次创建空模板
             with open(meta_file_path, "w", encoding="utf-8") as fp:
                 json.dump(default_meta, fp, ensure_ascii=False, indent=2)
             print(f"ℹ️ 首次创建元数据文件：{meta_file_path}")
@@ -64,25 +57,19 @@ def load_github_meta(meta_file_path):
         return default_meta
 
 def save_github_meta(meta_file_path, meta):
-    """保存元数据（修复Actions提交问题）"""
     try:
-        # 1. 本地写入文件（核心：确保文件能保存）
         with open(meta_file_path, "w", encoding="utf-8") as fp:
             json.dump(meta, fp, ensure_ascii=False, indent=2)
         print(f"✅ 元数据文件本地写入成功：{meta_file_path}")
         
-        # 2. GitHub Actions提交（容错处理）
         if os.getenv("GITHUB_ACTIONS") == "true" and os.getenv("GITHUB_TOKEN"):
             try:
                 git_config_and_checkout()
-                # 添加文件
                 subprocess.run(["git", "add", meta_file_path], check=True, capture_output=True)
-                # 提交（避免空提交）
                 status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout
                 if status:
                     commit_msg = f"更新NGA监控元数据：{os.path.basename(meta_file_path)}"
                     subprocess.run(["git", "commit", "-m", commit_msg], check=True, capture_output=True)
-                    # 推送（使用token）
                     remote_url = f"https://{os.getenv('GITHUB_TOKEN')}@github.com/{os.getenv('GITHUB_REPO', 'unknown')}.git"
                     subprocess.run(["git", "push", remote_url, "main"], check=True, capture_output=True)
                     print(f"✅ 元数据文件提交到GitHub成功")
@@ -95,19 +82,31 @@ def save_github_meta(meta_file_path, meta):
     except Exception as e:
         print(f"❌ 保存元数据失败：{e}")
 
-# ===================== 爬取逻辑修复（避免崩溃） =====================
+# ===================== 核心修复：页面有效性校验 =====================
 def is_page_valid(html):
-    """放宽页面有效性校验（适配NGA）"""
-    invalid_keywords = ["404", "500", "服务器错误", "页面不存在"]
-    if any(keyword in html for keyword in invalid_keywords):
+    """彻底放宽校验：只排除明确无效的页面（避免误杀有效内容）"""
+    # 只判定包含以下关键词的页面为无效（绝对无效场景）
+    invalid_keywords = [
+        "404 Not Found",
+        "500 Internal Server Error",
+        "服务器错误",
+        "页面不存在",
+        "该帖子已被删除",
+        "访问被拒绝",
+        "请登录后才能查看"  # 未登录的无效页面
+    ]
+    # 只要包含任意一个绝对无效关键词，才判定为无效
+    for keyword in invalid_keywords:
+        if keyword in html:
+            return False
+    # 内容长度≥1000字符（排除空页面/极小页面）
+    if len(html) < 1000:
         return False
-    # 放宽长度限制（NGA部分页面内容较短）
-    if len(html) < 500:
-        return False
+    # 其余情况均判定为有效页面
     return True
 
+# ===================== 爬取逻辑 =====================
 def crawl_page_with_retry(task, page):
-    """修复：始终返回列表，避免None"""
     if page < 1 or page > MAX_PAGE_LIMIT:
         print(f"[调试] 第{page}页：页码非法，返回空列表")
         return []
@@ -119,7 +118,6 @@ def crawl_page_with_retry(task, page):
         try:
             print(f"\n[调试] 爬取第{page}页（重试{retry}/{MAX_RETRY_TIMES}），URL：{crawl_url}")
             
-            # 添加超时+重试的requests配置
             session = requests.Session()
             session.headers.update(HEADERS)
             response = session.get(crawl_url, timeout=30, allow_redirects=True)
@@ -127,14 +125,15 @@ def crawl_page_with_retry(task, page):
             html = response.text
             
             if not is_page_valid(html):
-                print(f"⚠️ 第{page}页无效（内容长度：{len(html)}），重试中...")
+                print(f"⚠️ 第{page}页无效（包含无效关键词/长度不足），重试中...")
                 continue
             
-            # 多规则匹配回复块
+            # 多规则匹配回复块（适配NGA实际结构）
             post_patterns = [
                 re.compile(r'<table class=\'forumbox postbox\'[^>]*>[\s\S]*?</table>', re.IGNORECASE),
                 re.compile(r'<table class=\'postbox\'[^>]*>[\s\S]*?</table>', re.IGNORECASE),
                 re.compile(r'<div class=\'postrow\'[^>]*>[\s\S]*?</div>', re.IGNORECASE),
+                re.compile(r'<div id=\'postcontainer\d+\'[^>]*>[\s\S]*?</div>', re.IGNORECASE)
             ]
             
             posts = []
@@ -147,7 +146,7 @@ def crawl_page_with_retry(task, page):
             page_replies = []
             pid_set = set()
             for idx, post in enumerate(posts):
-                # 提取核心信息（容错）
+                # 提取核心信息（适配NGA实际格式）
                 pid_match = re.search(r'pid(\d+)Anchor', post) or re.search(r'id="pid(\d+)"', post)
                 time_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post)
                 content_match = re.search(r'class=\'(?:postcontent ubbcode|message)\'>([\s\S]*?)</(?:span|div)>', post)
@@ -162,7 +161,7 @@ def crawl_page_with_retry(task, page):
                 
                 reply_time = time_match.group(1) if time_match else "1970-01-01 00:00"
                 content = content_match.group(1)
-                # 清理内容
+                # 清理内容（保留核心文本）
                 content = re.sub(r"<.*?>", "", content)
                 content = re.sub(r"\[quote\][\s\S]*?\[/quote\]", "", content)
                 content = re.sub(r"\[img\].*?\[/img\]", "[图片]", content)
@@ -188,11 +187,9 @@ def crawl_page_with_retry(task, page):
                 print(f"⚠️ 第{page}页重试耗尽，返回空列表")
                 return []
     
-    # 所有重试失败，返回空列表
     return []
 
 def crawl_all_pages(task):
-    """修复：异常捕获+始终返回有效数据"""
     try:
         meta = load_github_meta(task["meta_file"])
         start_page = meta["last_page"] + 1
@@ -205,7 +202,6 @@ def crawl_all_pages(task):
         
         while empty_page_count < MAX_EMPTY_PAGES and current_page <= MAX_PAGE_LIMIT:
             page_replies = crawl_page_with_retry(task, current_page)
-            # 确保page_replies是列表
             if not isinstance(page_replies, list):
                 page_replies = []
             
@@ -234,7 +230,6 @@ def crawl_all_pages(task):
         return all_replies, last_crawled_page, meta
     except Exception as e:
         print(f"❌ 遍历页面失败：{e}")
-        # 异常时返回空数据，避免脚本崩溃
         return [], 0, {"last_page": 0, "pushed_pids": []}
 
 # ===================== 推送函数+请求头 =====================
@@ -271,7 +266,7 @@ def push(task, reply):
     except Exception as e:
         print(f"❌ 推送异常：{e}")
 
-# ===================== 主逻辑（增加容错） =====================
+# ===================== 主逻辑 =====================
 def run_task(task):
     print("\n" + "="*80)
     print(f"开始执行任务：{task['name']}")
@@ -283,7 +278,6 @@ def run_task(task):
         all_replies, last_crawled_page, meta = crawl_all_pages(task)
         pushed_pids = set(meta["pushed_pids"])
         
-        # 筛选新回复
         new_replies = [r for r in all_replies if r["pid"] not in pushed_pids]
         if new_replies:
             new_replies.sort(key=lambda x: (x["time"], x["pid"]), reverse=True)
@@ -298,13 +292,11 @@ def run_task(task):
             save_github_meta(task["meta_file"], meta)
             return
         
-        # 推送逻辑
         is_first_run = len(pushed_pids) == 0
         push_list = new_replies[:FIRST_RUN_PUSH_LIMIT] if is_first_run else new_replies
         print(f"\n🎯 {'首次运行：推送最新' if is_first_run else '非首次运行：推送全部'}{len(push_list)}条回复")
         
         if push_list:
-            # 去重推送
             push_pid_set = set()
             final_push_list = []
             for r in push_list:
@@ -317,7 +309,6 @@ def run_task(task):
                 print(f"\n--- 推送第{idx+1}条 ---")
                 push(task, r)
             
-            # 更新元数据
             new_pids = [r["pid"] for r in new_replies]
             meta["pushed_pids"] = list(pushed_pids.union(new_pids))
             meta["last_page"] = last_crawled_page
@@ -333,7 +324,6 @@ if __name__ == "__main__":
     print(f"\n=== NGA多用户监控脚本启动 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     print(f"📝 GitHub Actions环境：{os.getenv('GITHUB_ACTIONS', 'false')}")
     
-    # 初始化环境变量（兼容本地运行）
     if not os.getenv("GITHUB_REPO"):
         os.environ["GITHUB_REPO"] = os.getenv("GITHUB_REPOSITORY", "unknown/unknown")
     
@@ -341,7 +331,6 @@ if __name__ == "__main__":
         run_task(task)
     
     print(f"\n=== NGA多用户监控脚本结束 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
-    # 打印文件状态
     print(f"\n📂 元数据文件状态：")
     for task in MONITOR_TASKS:
         if os.path.exists(task["meta_file"]):
