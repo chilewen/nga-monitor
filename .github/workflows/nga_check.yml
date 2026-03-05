@@ -1,14 +1,16 @@
 name: NGA监控-5分钟自触发
 on:
   workflow_dispatch:  # 手动触发
-  repository_dispatch:  # API 触发
+  repository_dispatch:
+    types: [trigger_nga]  # 必须和API调用的event-type一致
 
 jobs:
   run-nga-monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      actions: write  # 新增：允许触发其他 workflow
+      contents: write        # 提交元数据文件
+      actions: write         # 允许触发其他workflow
+      repository-projects: write  # 补充权限，避免API调用失败
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
@@ -16,8 +18,10 @@ jobs:
           fetch-depth: 0
           ref: main
       
-      - name: 切换到main分支
-        run: git checkout main && git pull origin main --allow-unrelated-histories
+      - name: 切换到main分支并拉取最新代码
+        run: |
+          git checkout main
+          git pull origin main --allow-unrelated-histories
       
       - name: 设置Python
         uses: actions/setup-python@v5
@@ -34,15 +38,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_ACTIONS: "true"
-        run: python nga_monitor.py  # 你的脚本名
+        run: python nga_monitor.py  # 替换为你的脚本名
 
-      # 新增：等待5分钟后，触发自己（实现无限循环）
-      - name: 等待5分钟
-        run: sleep 300  # 300秒 = 5分钟
+      # ========== 核心修复：用curl直接调用GitHub API触发下一次运行 ==========
+      - name: 等待5分钟（300秒）
+        run: sleep 300
+        if: always()  # 即使脚本运行失败，也继续触发下一次
 
-      - name: 触发下一次运行
-        uses: peter-evans/repository-dispatch@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          event-type: trigger-nga
-          repository: ${{ github.repository }}
+      - name: 触发下一次workflow运行
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{
+              "event_type": "trigger_nga",
+              "client_payload": {
+                "ref": "main"
+              }
+            }'
+        if: always()  # 确保即使前面步骤失败，也触发下一次
