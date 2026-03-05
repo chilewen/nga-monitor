@@ -30,7 +30,7 @@ NGA_COOKIE = os.getenv("NGA_COOKIE")
 
 FIRST_RUN_PUSH_LIMIT = 3
 MAX_EMPTY_PAGES = 3
-MAX_PAGE_LIMIT = 100
+MAX_PAGE_LIMIT = 500
 MAX_RETRY_TIMES = 2
 # =====================================================================
 
