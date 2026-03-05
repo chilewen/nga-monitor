@@ -1,51 +1,59 @@
-name: NGA监控-5分钟自触发
+name: NGA监控-2分钟自动循环
 on:
   workflow_dispatch:  # 手动触发
   repository_dispatch:
-    types: [trigger_nga]  # 必须和API调用的event-type一致
+    types: [trigger_nga]  # API触发标识
 
 jobs:
   run-nga-monitor:
     runs-on: ubuntu-latest
     permissions:
-      contents: write        # 提交元数据文件
-      actions: write         # 允许触发其他workflow
-      repository-projects: write  # 补充权限，避免API调用失败
+      contents: write          # 提交元数据文件
+      actions: write           # 触发下一次运行
+      repository-projects: write  # 补充权限
     steps:
-      - name: 拉取代码
+      # 1. 拉取代码
+      - name: 拉取仓库代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: main
-      
-      - name: 切换到main分支并拉取最新代码
+
+      # 2. 配置Git
+      - name: 配置Git环境
         run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
           git checkout main
           git pull origin main --allow-unrelated-histories
-      
-      - name: 设置Python
+
+      # 3. 设置Python环境
+      - name: 安装Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-      
-      - name: 安装依赖
+          cache: "pip"  # 缓存依赖
+
+      # 4. 安装依赖
+      - name: 安装所需依赖
         run: pip install requests
-      
-      - name: 运行监控脚本
+
+      # 5. 运行NGA监控脚本
+      - name: 执行监控脚本
         env:
           BARK_KEY: ${{ secrets.BARK_KEY }}
           NGA_COOKIE: ${{ secrets.NGA_COOKIE }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPO: ${{ github.repository }}
           GITHUB_ACTIONS: "true"
-        run: python nga_monitor.py  # 替换为你的脚本名
+        run: python nga_monitor.py
 
-      # ========== 核心修复：用curl直接调用GitHub API触发下一次运行 ==========
-      - name: 等待2分钟（120秒）
+      # 6. 等待2分钟（120秒）
+      - name: 等待2分钟
         run: sleep 120
-        if: always()  # 即使脚本运行失败，也继续触发下一次
+        if: always()  # 即使脚本失败也继续
 
-      - name: 触发下一次workflow运行
+      # 7. 触发下一次运行（实现无限循环）
+      - name: 触发下一次workflow
         run: |
           curl -X POST \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
@@ -54,8 +62,7 @@ jobs:
             https://api.github.com/repos/${{ github.repository }}/dispatches \
             -d '{
               "event_type": "trigger_nga",
-              "client_payload": {
-                "ref": "main"
-              }
+              "client_payload": {"ref": "main"}
             }'
-        if: always()  # 确保即使前面步骤失败，也触发下一次
+        if: always()  # 确保循环不中断
+        continue-on-error: true  # 允许失败（避免整个流程中断）
