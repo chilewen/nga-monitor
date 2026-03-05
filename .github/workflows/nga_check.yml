@@ -41,8 +41,8 @@ jobs:
         run: python nga_monitor.py  # 替换为你的脚本名
 
       # ========== 核心修复：用curl直接调用GitHub API触发下一次运行 ==========
-      - name: 等待5分钟（300秒）
-        run: sleep 300
+      - name: 等待2分钟（120秒）
+        run: sleep 120
         if: always()  # 即使脚本运行失败，也继续触发下一次
 
       - name: 触发下一次workflow运行
