@@ -6,7 +6,7 @@ import sys
 import subprocess
 from datetime import datetime
 
-# ===================== 【核心配置区 - 只改这里】 =====================
+# ===================== 【核心配置区】 =====================
 MONITOR_TASKS = [
     {
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=370218",
@@ -25,22 +25,19 @@ MONITOR_TASKS = [
     }
 ]
 
-# 环境变量自动读取（无需修改）
 BARK_KEY = os.getenv("BARK_KEY")
 NGA_COOKIE = os.getenv("NGA_COOKIE")
 
-# 固定配置（无需修改）
+# 固定配置
 FIRST_RUN_PUSH_LIMIT = 3
 MAX_EMPTY_PAGES = 3
 MAX_PAGE_LIMIT = 100
 MAX_RETRY_TIMES = 2
-# 新增：NGA只看作者的核心参数
-NGA_AUTHOR_OPT = "opt=262144"
+NGA_AUTHOR_OPT = "opt=262144"  # 两个帖子都支持该参数
 # =====================================================================
 
-# ===================== 1. Cookie失效连续推送3条提醒 =====================
+# ===================== 1. Cookie失效提醒 =====================
 def push_cookie_expired_alert():
-    """Cookie失效时连续推送3条Bark提醒"""
     if not BARK_KEY:
         print("⚠️ BARK_KEY未配置，无法推送Cookie过期提醒")
         return
@@ -48,34 +45,22 @@ def push_cookie_expired_alert():
     alert_title = "🚨 NGA Cookie 已过期！紧急更新！"
     alert_content = "Cookie失效导致无法爬取内容，请立即更新GitHub Secrets中的NGA_COOKIE！"
     
-    # 连续推送3条，确保收到
     for i in range(3):
         try:
             bark_api = f"https://api.day.app/{BARK_KEY}/{alert_title}/{alert_content}"
-            params = {
-                "sound": "alert",       # 强提醒声音
-                "isArchive": 1,         # 保存到BARK历史
-                "group": "NGA监控"      # 归类到NGA监控分组
-            }
+            params = {"sound": "alert", "isArchive": 1, "group": "NGA监控"}
             response = requests.get(bark_api, params=params, timeout=8)
             if response.status_code == 200:
                 print(f"✅ Cookie过期提醒第 {i+1} 条推送成功")
-            else:
-                print(f"⚠️ Cookie过期提醒第 {i+1} 条推送失败：{response.status_code}")
         except Exception as e:
             print(f"❌ Cookie过期提醒第 {i+1} 条推送异常：{str(e)[:50]}")
 
 def is_cookie_invalid(html):
-    """判断Cookie是否失效（未登录状态）"""
-    invalid_keywords = [
-        "请登录后查看", "请登录后继续", "您需要登录", 
-        "登录后使用", "用户登录", "passport", "登录NGA"
-    ]
+    invalid_keywords = ["请登录后查看", "请登录后继续", "您需要登录", "登录后使用", "用户登录", "passport", "登录NGA"]
     return any(kw in html for kw in invalid_keywords)
 
-# ===================== 2. GitHub元数据文件操作 =====================
+# ===================== 2. 元数据操作（强制重建损坏文件） =====================
 def git_config():
-    """配置Git（适配GitHub Actions）"""
     try:
         subprocess.run(["git", "config", "--global", "user.name", "GitHub Actions"], check=True, capture_output=True)
         subprocess.run(["git", "config", "--global", "user.email", "actions@github.com"], check=True, capture_output=True)
@@ -84,41 +69,47 @@ def git_config():
         print(f"⚠️ Git配置警告：{e}")
 
 def load_meta(meta_file_path):
-    """加载/初始化元数据文件"""
+    """强制重建损坏的元数据文件"""
     os.makedirs(os.path.dirname(meta_file_path), exist_ok=True)
     default_meta = {"last_page": 0, "pushed_pids": []}
     
     try:
         if os.path.exists(meta_file_path):
+            # 尝试读取，失败则直接删除重建
             with open(meta_file_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
-                meta["last_page"] = meta.get("last_page", 0)
-                meta["pushed_pids"] = meta.get("pushed_pids", [])
+                # 验证元数据格式是否正确
+                if not isinstance(meta, dict) or "last_page" not in meta or "pushed_pids" not in meta:
+                    raise ValueError("元数据格式错误")
+                meta["last_page"] = int(meta.get("last_page", 0))
+                meta["pushed_pids"] = list(meta.get("pushed_pids", []))
             print(f"✅ 读取元数据成功：{meta_file_path}")
             return meta
         else:
+            # 新建文件
             with open(meta_file_path, "w", encoding="utf-8") as fp:
                 json.dump(default_meta, fp, ensure_ascii=False, indent=2)
             print(f"ℹ️ 首次创建元数据文件：{meta_file_path}")
             return default_meta
     except Exception as e:
-        print(f"⚠️ 读取元数据失败，使用默认值：{e}")
+        # 读取失败/格式错误 → 删除并重建
+        print(f"⚠️ 元数据文件损坏：{e}，删除并重建")
+        if os.path.exists(meta_file_path):
+            os.remove(meta_file_path)
+        with open(meta_file_path, "w", encoding="utf-8") as fp:
+            json.dump(default_meta, fp, ensure_ascii=False, indent=2)
         return default_meta
 
 def save_meta(meta_file_path, meta):
-    """保存元数据并提交到GitHub"""
     try:
-        # 本地保存
         with open(meta_file_path, "w", encoding="utf-8") as fp:
             json.dump(meta, fp, ensure_ascii=False, indent=2)
         print(f"✅ 元数据本地保存成功：{meta_file_path}")
         
-        # GitHub Actions下提交
         if os.getenv("GITHUB_ACTIONS") == "true":
             try:
                 git_config()
                 subprocess.run(["git", "add", meta_file_path], check=True, capture_output=True)
-                # 避免空提交
                 status = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout
                 if status:
                     subprocess.run(["git", "commit", "-m", f"更新NGA元数据：{os.path.basename(meta_file_path)}"], check=True, capture_output=True)
@@ -131,7 +122,7 @@ def save_meta(meta_file_path, meta):
     except Exception as e:
         print(f"❌ 保存元数据失败：{e}")
 
-# ===================== 3. 页面爬取核心逻辑 =====================
+# ===================== 3. 页面爬取（核心修复：适配opt参数的页面解析） =====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Cookie": NGA_COOKIE or "",
@@ -142,21 +133,19 @@ HEADERS = {
 }
 
 def is_page_valid(html):
-    """判断页面是否有效（适配只看作者的页面）"""
+    """优化：适配opt参数的页面有效性判定"""
+    # 只保留绝对无效的关键词
     invalid_keywords = ["404", "500", "服务器错误", "页面不存在", "该帖子已被删除"]
     if any(kw in html for kw in invalid_keywords):
         return False
-    # 调整长度阈值：只看作者的页面内容更少
-    return len(html) > 500
+    # 极低阈值：适配opt页面内容少的情况
+    return len(html) > 100  # 从300降到100
 
 def get_correct_url(task_url, page):
-    """生成带opt=262144的正确URL（核心修复）"""
-    # 1. 移除原有page参数
+    """生成带opt=262144的正确URL（两个帖子都支持）"""
     base_url = re.sub(r'&page=\d+', '', task_url)
-    # 2. 添加opt=262144参数（确保只看该作者）
     if NGA_AUTHOR_OPT not in base_url:
         base_url += f"&{NGA_AUTHOR_OPT}"
-    # 3. 添加当前页码（page=1时省略）
     if page > 1:
         final_url = f"{base_url}&page={page}"
     else:
@@ -164,11 +153,10 @@ def get_correct_url(task_url, page):
     return final_url
 
 def crawl_page(task, page):
-    """爬取单页内容"""
+    """修复：适配opt页面的回复提取正则"""
     if page < 1 or page > MAX_PAGE_LIMIT:
         return []
     
-    # 核心修复：生成带opt=262144的正确URL
     crawl_url = get_correct_url(task["url"], page)
     
     for retry in range(MAX_RETRY_TIMES + 1):
@@ -178,51 +166,59 @@ def crawl_page(task, page):
             response.encoding = "gbk"
             html = response.text
             
-            # 核心：Cookie失效检测
+            # Cookie失效检测
             if is_cookie_invalid(html):
                 print("❌ 检测到Cookie失效！")
                 push_cookie_expired_alert()
-                sys.exit(1)  # 直接退出脚本
+                sys.exit(1)
             
             if not is_page_valid(html):
                 print(f"⚠️ 第{page}页内容无效，重试中...")
                 continue
             
-            # 提取回复内容
-            post_pattern = re.compile(r'<table class=\'forumbox postbox\'[^>]*>[\s\S]*?</table>', re.IGNORECASE)
+            # ===================== 核心修复：适配opt页面的正则 =====================
+            # 优化正则：匹配opt页面的回复结构（更宽松）
+            post_pattern = re.compile(r'<table[^>]*class="?forumbox postbox"?[^>]*>[\s\S]*?</table>', re.IGNORECASE)
             posts = post_pattern.findall(html)
+            
+            if not posts:
+                # 备用正则：匹配NGA另一种回复结构
+                post_pattern = re.compile(r'<div[^>]*class="?postbox"?[^>]*>[\s\S]*?</div>', re.IGNORECASE)
+                posts = post_pattern.findall(html)
             
             replies = []
             pid_set = set()
             for post in posts:
-                # 提取PID、时间、内容
-                pid_match = re.search(r'pid(\d+)Anchor', post) or re.search(r'id="pid(\d+)"', post)
-                time_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post)
-                content_match = re.search(r'class=\'postcontent ubbcode\'>([\s\S]*?)</span>', post)
+                # 适配opt页面的PID提取
+                pid_match = re.search(r'pid(\d+)Anchor|data-pid="(\d+)"|id="pid(\d+)"', post)
+                time_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})', post)
+                # 适配opt页面的内容提取（更宽松）
+                content_match = re.search(r'class=["\']postcontent[^"\']*["\']>([\s\S]*?)</(span|div)>', post)
                 
                 if not (pid_match and content_match):
                     continue
                 
-                pid = pid_match.group(1)
-                if pid in pid_set:
+                # 处理PID匹配的多组结果
+                pid = pid_match.group(1) or pid_match.group(2) or pid_match.group(3)
+                if not pid or pid in pid_set:
                     continue
                 pid_set.add(pid)
                 
-                reply_time = time_match.group(1) if time_match else "1970-01-01 00:00"
+                reply_time = f"{time_match.group(1)} {time_match.group(2)}" if time_match else "1970-01-01 00:00"
                 content = content_match.group(1)
-                # 清理内容
-                content = re.sub(r"<.*?>", "", content)
-                content = re.sub(r"\[quote\][\s\S]*?\[/quote\]", "", content)
-                content = re.sub(r"\[img\].*?\[/img\]", "[图片]", content)
-                content = re.sub(r"\s+", " ", content).strip()[:300]  # 限制长度
+                # 清理内容（更彻底）
+                content = re.sub(r'<[^>]*>', '', content)  # 移除所有标签
+                content = re.sub(r'\[quote[\s\S]*?\[/quote\]', '', content)  # 移除引用
+                content = re.sub(r'\[img[\s\S]*?\[/img\]', '[图片]', content)
+                content = re.sub(r'\s+', ' ', content).strip()
                 
-                if len(content) < 3:
+                if len(content) < 2:
                     continue
                 
                 replies.append({
                     "pid": pid,
                     "time": reply_time,
-                    "content": content,
+                    "content": content[:300],
                     "page": page
                 })
             
@@ -237,15 +233,14 @@ def crawl_page(task, page):
     return []
 
 def crawl_all_pages(task):
-    """爬取所有页面（修复页码逻辑）"""
     meta = load_meta(task["meta_file"])
     start_page = meta["last_page"] + 1
     
-    # 核心修复：检测到页码异常（远超合理范围），重置为1
-    if start_page > 60:  # 小狼的帖子实际只有56页，设60为阈值
+    # 异常页码重置（小狼帖子阈值60，猫猫帖子可根据实际调整）
+    if task["name"] == "小狼" and start_page > 60:
         print(f"⚠️ 检测到异常页码{start_page}，重置为1重新开始")
         start_page = 1
-        meta["last_page"] = 0  # 重置元数据
+        meta["last_page"] = 0
     
     all_replies = []
     empty_page_count = 0
@@ -257,7 +252,6 @@ def crawl_all_pages(task):
     while empty_page_count < MAX_EMPTY_PAGES and current_page <= MAX_PAGE_LIMIT:
         page_replies = crawl_page(task, current_page)
         
-        # 去重
         unique_replies = [r for r in page_replies if r["pid"] not in global_pid_set]
         
         if unique_replies:
@@ -276,7 +270,6 @@ def crawl_all_pages(task):
     if last_crawled_page < start_page:
         last_crawled_page = start_page - 1
     
-    # 保存重置后的页码
     meta["last_page"] = last_crawled_page
     save_meta(task["meta_file"], meta)
     
@@ -285,12 +278,10 @@ def crawl_all_pages(task):
 
 # ===================== 4. 新回复推送 =====================
 def push_new_reply(task, reply):
-    """推送新回复到BARK"""
     if not BARK_KEY:
         print("⚠️ BARK_KEY未配置，跳过推送")
         return
     
-    # 提取帖子ID
     tid_match = re.search(r'tid=(\d+)', task["url"])
     tid = tid_match.group(1) if tid_match else "unknown"
     
@@ -301,10 +292,7 @@ def push_new_reply(task, reply):
     
     try:
         bark_api = f"https://api.day.app/{BARK_KEY}/{title}/{content}"
-        params = {
-            "isArchive": 1,
-            "group": "NGA监控"
-        }
+        params = {"isArchive": 1, "group": "NGA监控"}
         response = requests.get(bark_api, params=params, timeout=8)
         if response.status_code == 200 and response.json().get("code") == 200:
             print(f"✅ 推送成功 | PID={reply['pid']} | 页码={reply['page']}")
@@ -315,7 +303,6 @@ def push_new_reply(task, reply):
 
 # ===================== 5. 主任务执行 =====================
 def run_task(task):
-    """执行单个监控任务"""
     print("\n" + "="*80)
     print(f"开始执行任务：{task['name']}")
     print(f"任务URL：{task['url']}")
@@ -323,18 +310,14 @@ def run_task(task):
     print("="*80)
     
     try:
-        # 爬取所有页面
         all_replies, last_crawled_page, meta = crawl_all_pages(task)
         
-        # 筛选新回复
         new_replies = [r for r in all_replies if r["pid"] not in meta["pushed_pids"]]
         
         if new_replies:
-            # 排序（按时间倒序）
             new_replies.sort(key=lambda x: x["time"], reverse=True)
             print(f"\n🎉 发现{len(new_replies)}条新回复，开始推送...")
             
-            # 推送（首次运行只推最新3条）
             is_first_run = len(meta["pushed_pids"]) == 0
             push_replies = new_replies[:FIRST_RUN_PUSH_LIMIT] if is_first_run else new_replies
             
@@ -342,7 +325,6 @@ def run_task(task):
                 print(f"\n--- 推送第{idx+1}条 ---")
                 push_new_reply(task, reply)
             
-            # 更新元数据（已在crawl_all_pages中保存）
             meta["pushed_pids"].extend([r["pid"] for r in new_replies])
             save_meta(task["meta_file"], meta)
         else:
@@ -359,11 +341,9 @@ if __name__ == "__main__":
     print(f"📌 GitHub Actions环境：{os.getenv('GITHUB_ACTIONS', 'false')}")
     print(f"📌 监控任务数量：{len(MONITOR_TASKS)}")
     
-    # 执行所有监控任务
     for task in MONITOR_TASKS:
         run_task(task)
     
-    # 打印运行总结
     print(f"\n=== NGA监控脚本结束 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===")
     print(f"\n📂 元数据文件状态：")
     for task in MONITOR_TASKS:
