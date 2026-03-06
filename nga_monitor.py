@@ -32,8 +32,10 @@ NGA_COOKIE = os.getenv("NGA_COOKIE")
 # 固定配置（无需修改）
 FIRST_RUN_PUSH_LIMIT = 3
 MAX_EMPTY_PAGES = 3
-MAX_PAGE_LIMIT = 500
+MAX_PAGE_LIMIT = 100
 MAX_RETRY_TIMES = 2
+# 新增：NGA只看作者的核心参数
+NGA_AUTHOR_OPT = "opt=262144"
 # =====================================================================
 
 # ===================== 1. Cookie失效连续推送3条提醒 =====================
@@ -140,20 +142,34 @@ HEADERS = {
 }
 
 def is_page_valid(html):
-    """判断页面是否有效"""
+    """判断页面是否有效（适配只看作者的页面）"""
     invalid_keywords = ["404", "500", "服务器错误", "页面不存在", "该帖子已被删除"]
     if any(kw in html for kw in invalid_keywords):
         return False
-    return len(html) > 1000
+    # 调整长度阈值：只看作者的页面内容更少
+    return len(html) > 500
+
+def get_correct_url(task_url, page):
+    """生成带opt=262144的正确URL（核心修复）"""
+    # 1. 移除原有page参数
+    base_url = re.sub(r'&page=\d+', '', task_url)
+    # 2. 添加opt=262144参数（确保只看该作者）
+    if NGA_AUTHOR_OPT not in base_url:
+        base_url += f"&{NGA_AUTHOR_OPT}"
+    # 3. 添加当前页码（page=1时省略）
+    if page > 1:
+        final_url = f"{base_url}&page={page}"
+    else:
+        final_url = base_url
+    return final_url
 
 def crawl_page(task, page):
     """爬取单页内容"""
     if page < 1 or page > MAX_PAGE_LIMIT:
         return []
     
-    # 构造爬取URL
-    base_url = task["url"].split("&page=")[0] if "&page=" in task["url"] else task["url"]
-    crawl_url = f"{base_url}&page={page}" if page > 1 else base_url
+    # 核心修复：生成带opt=262144的正确URL
+    crawl_url = get_correct_url(task["url"], page)
     
     for retry in range(MAX_RETRY_TIMES + 1):
         try:
@@ -221,9 +237,16 @@ def crawl_page(task, page):
     return []
 
 def crawl_all_pages(task):
-    """爬取所有页面"""
+    """爬取所有页面（修复页码逻辑）"""
     meta = load_meta(task["meta_file"])
     start_page = meta["last_page"] + 1
+    
+    # 核心修复：检测到页码异常（远超合理范围），重置为1
+    if start_page > 60:  # 小狼的帖子实际只有56页，设60为阈值
+        print(f"⚠️ 检测到异常页码{start_page}，重置为1重新开始")
+        start_page = 1
+        meta["last_page"] = 0  # 重置元数据
+    
     all_replies = []
     empty_page_count = 0
     current_page = start_page
@@ -252,6 +275,10 @@ def crawl_all_pages(task):
     last_crawled_page = current_page - empty_page_count - 1
     if last_crawled_page < start_page:
         last_crawled_page = start_page - 1
+    
+    # 保存重置后的页码
+    meta["last_page"] = last_crawled_page
+    save_meta(task["meta_file"], meta)
     
     print(f"\n📊 遍历完成：最后有效页码={last_crawled_page}，累计新回复={len(all_replies)}")
     return all_replies, last_crawled_page, meta
@@ -315,13 +342,11 @@ def run_task(task):
                 print(f"\n--- 推送第{idx+1}条 ---")
                 push_new_reply(task, reply)
             
-            # 更新元数据
+            # 更新元数据（已在crawl_all_pages中保存）
             meta["pushed_pids"].extend([r["pid"] for r in new_replies])
-            meta["last_page"] = last_crawled_page
             save_meta(task["meta_file"], meta)
         else:
             print(f"\nℹ️ 未发现新回复，更新最后爬取页码")
-            meta["last_page"] = last_crawled_page
             save_meta(task["meta_file"], meta)
         
         print(f"\n✅ 任务执行完成：{task['name']}")
