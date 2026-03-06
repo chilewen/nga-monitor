@@ -6,23 +6,24 @@ import sys
 import subprocess
 from datetime import datetime
 
-# ===================== 【核心配置区】 =====================
+# ===================== 【核心配置区 - 极简最终版】 =====================
+# 所有帖子都强制带opt=262144，无需任何差异化配置
 MONITOR_TASKS = [
     {
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=370218",
         "name": "猫猫",
         "meta_file": "nga_monitor/45502551_370218_meta.json"
     },
-     {
-        "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=26529713",
-        "name": "小雨",
-        "meta_file": "nga_monitor/45502551_26529713_meta.json"
-    },
     {
         "url": "https://bbs.nga.cn/read.php?tid=45974302&authorid=150058",
         "name": "小狼",
         "meta_file": "nga_monitor/45974302_150058_meta.json"
-    }
+    },
+    {
+        "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=26529713",
+        "name": "小雨",
+        "meta_file": "nga_monitor/45502551_26529713_meta.json"
+    },
 ]
 
 BARK_KEY = os.getenv("BARK_KEY")
@@ -33,7 +34,7 @@ FIRST_RUN_PUSH_LIMIT = 3
 MAX_EMPTY_PAGES = 3
 MAX_PAGE_LIMIT = 100
 MAX_RETRY_TIMES = 2
-NGA_AUTHOR_OPT = "opt=262144"  # 两个帖子都支持该参数
+NGA_AUTHOR_OPT = "opt=262144"  # 全局强制添加
 # =====================================================================
 
 # ===================== 1. Cookie失效提醒 =====================
@@ -59,7 +60,7 @@ def is_cookie_invalid(html):
     invalid_keywords = ["请登录后查看", "请登录后继续", "您需要登录", "登录后使用", "用户登录", "passport", "登录NGA"]
     return any(kw in html for kw in invalid_keywords)
 
-# ===================== 2. 元数据操作（强制重建损坏文件） =====================
+# ===================== 2. 元数据操作 =====================
 def git_config():
     try:
         subprocess.run(["git", "config", "--global", "user.name", "GitHub Actions"], check=True, capture_output=True)
@@ -69,30 +70,25 @@ def git_config():
         print(f"⚠️ Git配置警告：{e}")
 
 def load_meta(meta_file_path):
-    """强制重建损坏的元数据文件"""
     os.makedirs(os.path.dirname(meta_file_path), exist_ok=True)
     default_meta = {"last_page": 0, "pushed_pids": []}
     
     try:
         if os.path.exists(meta_file_path):
-            # 尝试读取，失败则直接删除重建
             with open(meta_file_path, "r", encoding="utf-8") as fp:
                 meta = json.load(fp)
-                # 验证元数据格式是否正确
                 if not isinstance(meta, dict) or "last_page" not in meta or "pushed_pids" not in meta:
-                    raise ValueError("元数据格式错误")
+                    raise ValueError("格式错误")
                 meta["last_page"] = int(meta.get("last_page", 0))
                 meta["pushed_pids"] = list(meta.get("pushed_pids", []))
             print(f"✅ 读取元数据成功：{meta_file_path}")
             return meta
         else:
-            # 新建文件
             with open(meta_file_path, "w", encoding="utf-8") as fp:
                 json.dump(default_meta, fp, ensure_ascii=False, indent=2)
             print(f"ℹ️ 首次创建元数据文件：{meta_file_path}")
             return default_meta
     except Exception as e:
-        # 读取失败/格式错误 → 删除并重建
         print(f"⚠️ 元数据文件损坏：{e}，删除并重建")
         if os.path.exists(meta_file_path):
             os.remove(meta_file_path)
@@ -122,7 +118,7 @@ def save_meta(meta_file_path, meta):
     except Exception as e:
         print(f"❌ 保存元数据失败：{e}")
 
-# ===================== 3. 页面爬取（核心修复：适配opt参数的页面解析） =====================
+# ===================== 3. 页面爬取（核心修复：全局带opt，适配提取） =====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Cookie": NGA_COOKIE or "",
@@ -133,19 +129,17 @@ HEADERS = {
 }
 
 def is_page_valid(html):
-    """优化：适配opt参数的页面有效性判定"""
-    # 只保留绝对无效的关键词
-    invalid_keywords = ["404", "500", "服务器错误", "页面不存在", "该帖子已被删除"]
-    if any(kw in html for kw in invalid_keywords):
-        return False
-    # 极低阈值：适配opt页面内容少的情况
-    return len(html) > 100  # 从300降到100
+    """极简判定：只要不是404/500，就视为有效（彻底放弃长度阈值）"""
+    invalid_keywords = ["404", "500", "服务器错误", "页面不存在", "该帖子已被删除", "网页解析失败"]
+    return not any(kw in html for kw in invalid_keywords)
 
 def get_correct_url(task_url, page):
-    """生成带opt=262144的正确URL（两个帖子都支持）"""
+    """全局强制添加opt=262144，无需判断"""
+    # 移除原有page参数，强制添加opt
     base_url = re.sub(r'&page=\d+', '', task_url)
     if NGA_AUTHOR_OPT not in base_url:
         base_url += f"&{NGA_AUTHOR_OPT}"
+    # 添加页码
     if page > 1:
         final_url = f"{base_url}&page={page}"
     else:
@@ -153,10 +147,7 @@ def get_correct_url(task_url, page):
     return final_url
 
 def crawl_page(task, page):
-    """修复：适配opt页面的回复提取正则"""
-    if page < 1 or page > MAX_PAGE_LIMIT:
-        return []
-    
+    """修复：适配opt页面的通用提取逻辑"""
     crawl_url = get_correct_url(task["url"], page)
     
     for retry in range(MAX_RETRY_TIMES + 1):
@@ -172,45 +163,50 @@ def crawl_page(task, page):
                 push_cookie_expired_alert()
                 sys.exit(1)
             
+            # 页面有效性判定（极简版）
             if not is_page_valid(html):
-                print(f"⚠️ 第{page}页内容无效，重试中...")
+                print(f"⚠️ 第{page}页内容无效（404/500），重试中...")
                 continue
             
-            # ===================== 核心修复：适配opt页面的正则 =====================
-            # 优化正则：匹配opt页面的回复结构（更宽松）
+            # ===================== 核心修复：适配opt页面的提取逻辑 =====================
+            replies = []
+            pid_set = set()
+            
+            # 规则1：匹配opt页面的回复块（table布局）
             post_pattern = re.compile(r'<table[^>]*class="?forumbox postbox"?[^>]*>[\s\S]*?</table>', re.IGNORECASE)
             posts = post_pattern.findall(html)
             
+            # 规则2：如果没匹配到，用div布局兜底
             if not posts:
-                # 备用正则：匹配NGA另一种回复结构
                 post_pattern = re.compile(r'<div[^>]*class="?postbox"?[^>]*>[\s\S]*?</div>', re.IGNORECASE)
                 posts = post_pattern.findall(html)
             
-            replies = []
-            pid_set = set()
+            # 提取回复信息
             for post in posts:
-                # 适配opt页面的PID提取
+                # 提取PID（多格式适配）
                 pid_match = re.search(r'pid(\d+)Anchor|data-pid="(\d+)"|id="pid(\d+)"', post)
-                time_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})', post)
-                # 适配opt页面的内容提取（更宽松）
-                content_match = re.search(r'class=["\']postcontent[^"\']*["\']>([\s\S]*?)</(span|div)>', post)
-                
-                if not (pid_match and content_match):
+                if not pid_match:
                     continue
-                
-                # 处理PID匹配的多组结果
                 pid = pid_match.group(1) or pid_match.group(2) or pid_match.group(3)
-                if not pid or pid in pid_set:
+                if pid in pid_set:
                     continue
                 pid_set.add(pid)
                 
+                # 提取时间
+                time_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})', post)
                 reply_time = f"{time_match.group(1)} {time_match.group(2)}" if time_match else "1970-01-01 00:00"
+                
+                # 提取内容（多标签适配）
+                content_match = re.search(r'class=["\']postcontent[^"\']*["\']>([\s\S]*?)</(span|div)>', post)
+                if not content_match:
+                    continue
                 content = content_match.group(1)
-                # 清理内容（更彻底）
-                content = re.sub(r'<[^>]*>', '', content)  # 移除所有标签
-                content = re.sub(r'\[quote[\s\S]*?\[/quote\]', '', content)  # 移除引用
+                
+                # 清理内容
+                content = re.sub(r'<[^>]*>', '', content)
+                content = re.sub(r'\[quote[\s\S]*?\[/quote\]', '', content)
                 content = re.sub(r'\[img[\s\S]*?\[/img\]', '[图片]', content)
-                content = re.sub(r'\s+', ' ', content).strip()
+                content = re.sub(r'\s+', ' ', content).strip()[:300]
                 
                 if len(content) < 2:
                     continue
@@ -218,7 +214,7 @@ def crawl_page(task, page):
                 replies.append({
                     "pid": pid,
                     "time": reply_time,
-                    "content": content[:300],
+                    "content": content,
                     "page": page
                 })
             
@@ -236,8 +232,8 @@ def crawl_all_pages(task):
     meta = load_meta(task["meta_file"])
     start_page = meta["last_page"] + 1
     
-    # 异常页码重置（小狼帖子阈值60，猫猫帖子可根据实际调整）
-    if task["name"] == "小狼" and start_page > 60:
+    # 异常页码重置（通用阈值）
+    if start_page > 100:
         print(f"⚠️ 检测到异常页码{start_page}，重置为1重新开始")
         start_page = 1
         meta["last_page"] = 0
@@ -248,10 +244,12 @@ def crawl_all_pages(task):
     global_pid_set = set(meta["pushed_pids"])
     
     print(f"\n🚀 开始遍历页面：从第{start_page}页开始，连续{MAX_EMPTY_PAGES}页无回复则停止")
+    print(f"🎯 全局强制带opt=262144参数")
     
     while empty_page_count < MAX_EMPTY_PAGES and current_page <= MAX_PAGE_LIMIT:
         page_replies = crawl_page(task, current_page)
         
+        # 去重
         unique_replies = [r for r in page_replies if r["pid"] not in global_pid_set]
         
         if unique_replies:
