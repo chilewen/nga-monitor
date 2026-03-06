@@ -6,7 +6,7 @@ import sys
 import subprocess
 from datetime import datetime
 
-# ===================== 【核心配置区 - 带调试打印】 =====================
+# ===================== 【核心配置区】 =====================
 MONITOR_TASKS = [
     {
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=370218",
@@ -22,7 +22,7 @@ MONITOR_TASKS = [
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=26529713",
         "name": "小雨",
         "meta_file": "nga_monitor/45502551_26529713_meta.json",
-        "debug_print": True  # 仅对小雨任务打印页面内容
+        # "debug_print": False  # 调试完成后可关闭
     },
 ]
 
@@ -118,7 +118,7 @@ def save_meta(meta_file_path, meta):
     except Exception as e:
         print(f"❌ 保存元数据失败：{e}")
 
-# ===================== 3. 页面爬取（带调试打印） =====================
+# ===================== 3. 页面爬取（精准匹配你的HTML结构） =====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Cookie": NGA_COOKIE or "",
@@ -129,9 +129,14 @@ HEADERS = {
 }
 
 def is_page_valid(html):
-    """极简判定：只要不是404/500，就视为有效"""
-    invalid_keywords = ["404", "500", "服务器错误", "页面不存在", "该帖子已被删除", "网页解析失败"]
-    return not any(kw in html for kw in invalid_keywords)
+    """彻底修复：只要有有效回复结构，就判定为有效"""
+    # 只排除绝对无效的情况，不再误判
+    invalid_keywords = ["404 Not Found", "500 Internal Server Error", "服务器错误", "页面不存在", "该帖子已被删除"]
+    if any(kw in html for kw in invalid_keywords):
+        return False
+    # 新增：检测是否包含有效回复结构（匹配你贴出的HTML）
+    valid_structures = ["forumbox postbox", "postcontent ubbcode", "pid.*Anchor", "postdate"]
+    return any(struct in html for struct in valid_structures)
 
 def get_correct_url(task_url, page):
     """全局强制添加opt=262144"""
@@ -145,7 +150,7 @@ def get_correct_url(task_url, page):
     return final_url
 
 def crawl_page(task, page):
-    """带调试打印：输出小雨任务的页面完整内容"""
+    """精准匹配你的HTML结构提取回复"""
     crawl_url = get_correct_url(task["url"], page)
     debug_print = task.get("debug_print", False)
     
@@ -154,10 +159,10 @@ def crawl_page(task, page):
             print(f"\n[调试] 爬取第{page}页（重试{retry}/{MAX_RETRY_TIMES}）：{crawl_url}")
             response = requests.get(crawl_url, headers=HEADERS, timeout=20, allow_redirects=True)
             
-            # 调试打印：输出响应状态码和页面内容（仅小雨任务）
+            # 调试打印（可选）
             if debug_print:
                 print(f"🔍 【调试信息】响应状态码：{response.status_code}")
-                print(f"🔍 【调试信息】页面完整内容：\n{response.text}")
+                print(f"🔍 【调试信息】页面片段：\n{response.text[:1000]}")
                 print("="*50 + " 调试内容结束 " + "="*50)
             
             response.encoding = "gbk"
@@ -169,49 +174,59 @@ def crawl_page(task, page):
                 push_cookie_expired_alert()
                 sys.exit(1)
             
-            # 页面有效性判定
+            # 页面有效性判定（修复后）
             if not is_page_valid(html):
-                print(f"⚠️ 第{page}页内容无效（404/500），重试中...")
+                print(f"⚠️ 第{page}页内容无效（无有效回复结构），重试中...")
                 continue
             
-            # 提取回复
+            # ===================== 核心修复：精准匹配你的HTML结构 =====================
             replies = []
             pid_set = set()
-            post_pattern = re.compile(r'<table[^>]*class="?forumbox postbox"?[^>]*>[\s\S]*?</table>', re.IGNORECASE)
+            
+            # 匹配你贴出的<table class='forumbox postbox'>结构
+            post_pattern = re.compile(r'<table class=\'forumbox postbox\'[^>]*>[\s\S]*?</table>', re.IGNORECASE)
             posts = post_pattern.findall(html)
             
-            if not posts:
-                post_pattern = re.compile(r'<div[^>]*class="?postbox"?[^>]*>[\s\S]*?</div>', re.IGNORECASE)
-                posts = post_pattern.findall(html)
-            
             for post in posts:
-                pid_match = re.search(r'pid(\d+)Anchor|data-pid="(\d+)"|id="pid(\d+)"', post)
+                # 1. 提取PID（匹配你的pid846384094Anchor）
+                pid_match = re.search(r'pid(\d+)Anchor', post)
                 if not pid_match:
                     continue
-                pid = pid_match.group(1) or pid_match.group(2) or pid_match.group(3)
+                pid = pid_match.group(1)
                 if pid in pid_set:
                     continue
                 pid_set.add(pid)
                 
-                time_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})', post)
-                reply_time = f"{time_match.group(1)} {time_match.group(2)}" if time_match else "1970-01-01 00:00"
+                # 2. 提取回复时间（匹配你的2025-11-03 16:41）
+                time_match = re.search(r'postdate\d+ title=\'reply time\'>(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post)
+                if not time_match:
+                    time_match = re.search(r'(\d{4}-\d{2}-\d{2} \d{2}:\d{2})', post)  # 兜底匹配
+                reply_time = time_match.group(1) if time_match else "1970-01-01 00:00"
                 
-                content_match = re.search(r'class=["\']postcontent[^"\']*["\']>([\s\S]*?)</(span|div)>', post)
+                # 3. 提取回复内容（匹配你的postcontent ubbcode）
+                content_match = re.search(r'postcontent\d+ class=\'postcontent ubbcode\'>([\s\S]*?)</span>', post)
                 if not content_match:
                     continue
                 content = content_match.group(1)
-                content = re.sub(r'<[^>]*>', '', content)
-                content = re.sub(r'\[quote[\s\S]*?\[/quote\]', '', content)
-                content = re.sub(r'\[img[\s\S]*?\[/img\]', '[图片]', content)
-                content = re.sub(r'\s+', ' ', content).strip()[:300]
+                
+                # 4. 清理内容（匹配你的HTML格式）
+                content = re.sub(r'<br\s*/?>', '\n', content)  # 替换<br>为换行
+                content = re.sub(r'\[img\][\s\S]*?\[/img\]', '[图片]', content)  # 替换图片标签
+                content = re.sub(r'<[^>]*>', '', content)  # 移除所有HTML标签
+                content = re.sub(r'\s+', ' ', content).strip()[:300]  # 清理多余空格
                 
                 if len(content) < 2:
                     continue
+                
+                # 5. 提取作者ID（匹配你的uid=26529713）
+                authorid_match = re.search(r'uid=(\d+)', post)
+                authorid = authorid_match.group(1) if authorid_match else ""
                 
                 replies.append({
                     "pid": pid,
                     "time": reply_time,
                     "content": content,
+                    "authorid": authorid,
                     "page": page
                 })
             
