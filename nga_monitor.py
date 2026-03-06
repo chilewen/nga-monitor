@@ -6,8 +6,7 @@ import sys
 import subprocess
 from datetime import datetime
 
-# ===================== 【核心配置区 - 极简最终版】 =====================
-# 所有帖子都强制带opt=262144，无需任何差异化配置
+# ===================== 【核心配置区 - 带调试打印】 =====================
 MONITOR_TASKS = [
     {
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=370218",
@@ -22,7 +21,8 @@ MONITOR_TASKS = [
     {
         "url": "https://bbs.nga.cn/read.php?tid=45502551&authorid=26529713",
         "name": "小雨",
-        "meta_file": "nga_monitor/45502551_26529713_meta.json"
+        "meta_file": "nga_monitor/45502551_26529713_meta.json",
+        "debug_print": True  # 仅对小雨任务打印页面内容
     },
 ]
 
@@ -34,7 +34,7 @@ FIRST_RUN_PUSH_LIMIT = 3
 MAX_EMPTY_PAGES = 3
 MAX_PAGE_LIMIT = 100
 MAX_RETRY_TIMES = 2
-NGA_AUTHOR_OPT = "opt=262144"  # 全局强制添加
+NGA_AUTHOR_OPT = "opt=262144"
 # =====================================================================
 
 # ===================== 1. Cookie失效提醒 =====================
@@ -118,7 +118,7 @@ def save_meta(meta_file_path, meta):
     except Exception as e:
         print(f"❌ 保存元数据失败：{e}")
 
-# ===================== 3. 页面爬取（核心修复：全局带opt，适配提取） =====================
+# ===================== 3. 页面爬取（带调试打印） =====================
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Cookie": NGA_COOKIE or "",
@@ -129,17 +129,15 @@ HEADERS = {
 }
 
 def is_page_valid(html):
-    """极简判定：只要不是404/500，就视为有效（彻底放弃长度阈值）"""
+    """极简判定：只要不是404/500，就视为有效"""
     invalid_keywords = ["404", "500", "服务器错误", "页面不存在", "该帖子已被删除", "网页解析失败"]
     return not any(kw in html for kw in invalid_keywords)
 
 def get_correct_url(task_url, page):
-    """全局强制添加opt=262144，无需判断"""
-    # 移除原有page参数，强制添加opt
+    """全局强制添加opt=262144"""
     base_url = re.sub(r'&page=\d+', '', task_url)
     if NGA_AUTHOR_OPT not in base_url:
         base_url += f"&{NGA_AUTHOR_OPT}"
-    # 添加页码
     if page > 1:
         final_url = f"{base_url}&page={page}"
     else:
@@ -147,13 +145,21 @@ def get_correct_url(task_url, page):
     return final_url
 
 def crawl_page(task, page):
-    """修复：适配opt页面的通用提取逻辑"""
+    """带调试打印：输出小雨任务的页面完整内容"""
     crawl_url = get_correct_url(task["url"], page)
+    debug_print = task.get("debug_print", False)
     
     for retry in range(MAX_RETRY_TIMES + 1):
         try:
             print(f"\n[调试] 爬取第{page}页（重试{retry}/{MAX_RETRY_TIMES}）：{crawl_url}")
             response = requests.get(crawl_url, headers=HEADERS, timeout=20, allow_redirects=True)
+            
+            # 调试打印：输出响应状态码和页面内容（仅小雨任务）
+            if debug_print:
+                print(f"🔍 【调试信息】响应状态码：{response.status_code}")
+                print(f"🔍 【调试信息】页面完整内容：\n{response.text}")
+                print("="*50 + " 调试内容结束 " + "="*50)
+            
             response.encoding = "gbk"
             html = response.text
             
@@ -163,27 +169,22 @@ def crawl_page(task, page):
                 push_cookie_expired_alert()
                 sys.exit(1)
             
-            # 页面有效性判定（极简版）
+            # 页面有效性判定
             if not is_page_valid(html):
                 print(f"⚠️ 第{page}页内容无效（404/500），重试中...")
                 continue
             
-            # ===================== 核心修复：适配opt页面的提取逻辑 =====================
+            # 提取回复
             replies = []
             pid_set = set()
-            
-            # 规则1：匹配opt页面的回复块（table布局）
             post_pattern = re.compile(r'<table[^>]*class="?forumbox postbox"?[^>]*>[\s\S]*?</table>', re.IGNORECASE)
             posts = post_pattern.findall(html)
             
-            # 规则2：如果没匹配到，用div布局兜底
             if not posts:
                 post_pattern = re.compile(r'<div[^>]*class="?postbox"?[^>]*>[\s\S]*?</div>', re.IGNORECASE)
                 posts = post_pattern.findall(html)
             
-            # 提取回复信息
             for post in posts:
-                # 提取PID（多格式适配）
                 pid_match = re.search(r'pid(\d+)Anchor|data-pid="(\d+)"|id="pid(\d+)"', post)
                 if not pid_match:
                     continue
@@ -192,17 +193,13 @@ def crawl_page(task, page):
                     continue
                 pid_set.add(pid)
                 
-                # 提取时间
                 time_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})', post)
                 reply_time = f"{time_match.group(1)} {time_match.group(2)}" if time_match else "1970-01-01 00:00"
                 
-                # 提取内容（多标签适配）
                 content_match = re.search(r'class=["\']postcontent[^"\']*["\']>([\s\S]*?)</(span|div)>', post)
                 if not content_match:
                     continue
                 content = content_match.group(1)
-                
-                # 清理内容
                 content = re.sub(r'<[^>]*>', '', content)
                 content = re.sub(r'\[quote[\s\S]*?\[/quote\]', '', content)
                 content = re.sub(r'\[img[\s\S]*?\[/img\]', '[图片]', content)
@@ -232,7 +229,6 @@ def crawl_all_pages(task):
     meta = load_meta(task["meta_file"])
     start_page = meta["last_page"] + 1
     
-    # 异常页码重置（通用阈值）
     if start_page > 100:
         print(f"⚠️ 检测到异常页码{start_page}，重置为1重新开始")
         start_page = 1
@@ -249,7 +245,6 @@ def crawl_all_pages(task):
     while empty_page_count < MAX_EMPTY_PAGES and current_page <= MAX_PAGE_LIMIT:
         page_replies = crawl_page(task, current_page)
         
-        # 去重
         unique_replies = [r for r in page_replies if r["pid"] not in global_pid_set]
         
         if unique_replies:
