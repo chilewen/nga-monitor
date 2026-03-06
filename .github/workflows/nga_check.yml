@@ -47,21 +47,21 @@ jobs:
         run: python nga_monitor.py
 
       # 6. 等待5分钟（300秒）
-      # - name: 等待5分钟
-      #   run: sleep 300
-      #   if: always()  # 即使脚本失败也继续
+      - name: 等待5分钟
+        run: sleep 300
+        if: always()  # 即使脚本失败也继续
 
-      # # 7. 触发下一次运行（实现无限循环）
-      # - name: 触发下一次workflow
-      #   run: |
-      #     curl -X POST \
-      #       -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-      #       -H "Accept: application/vnd.github.v3+json" \
-      #       -H "Content-Type: application/json" \
-      #       https://api.github.com/repos/${{ github.repository }}/dispatches \
-      #       -d '{
-      #         "event_type": "trigger_nga",
-      #         "client_payload": {"ref": "main"}
-      #       }'
-      #   if: always()  # 确保循环不中断
-      #   continue-on-error: true  # 允许失败（避免整个流程中断）
+      # 7. 触发下一次运行（实现无限循环）
+      - name: 触发下一次workflow
+        run: |
+          curl -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Content-Type: application/json" \
+            https://api.github.com/repos/${{ github.repository }}/dispatches \
+            -d '{
+              "event_type": "trigger_nga",
+              "client_payload": {"ref": "main"}
+            }'
+        if: always()  # 确保循环不中断
+        continue-on-error: true  # 允许失败（避免整个流程中断）
