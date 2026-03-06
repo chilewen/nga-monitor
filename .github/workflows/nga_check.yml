@@ -1,4 +1,4 @@
-name: NGA监控-2分钟自动循环
+name: NGA监控-5分钟自动循环
 on:
   workflow_dispatch:  # 手动触发
   repository_dispatch:
@@ -27,14 +27,13 @@ jobs:
           git checkout main
           git pull origin main --allow-unrelated-histories
 
-      # 3. 设置Python环境
+      # 3. 设置Python环境（修复缓存报错）
       - name: 安装Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
-          cache: "pip"  # 缓存依赖
+          python-version: "3.10"  # 去掉cache配置
 
-      # 4. 安装依赖
+      # 4. 安装所需依赖
       - name: 安装所需依赖
         run: pip install requests
 
@@ -47,9 +46,9 @@ jobs:
           GITHUB_ACTIONS: "true"
         run: python nga_monitor.py
 
-      # 6. 等待2分钟（120秒）
-      - name: 等待2分钟
-        run: sleep 120
+      # 6. 等待5分钟（300秒）
+      - name: 等待5分钟
+        run: sleep 300
         if: always()  # 即使脚本失败也继续
 
       # 7. 触发下一次运行（实现无限循环）
